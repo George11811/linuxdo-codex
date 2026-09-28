@@ -30,6 +30,19 @@ ok("列表从 /latest.json 渲染出行", qa(".cx-trow").length >= 5, qa(".cx-tr
 ok("列表标题正确", (q(".cx-proj-head h1") || {}).textContent === "最新", (q(".cx-proj-head h1") || {}).textContent);
 ok("rail 分类分组渲染", /开发调优/.test((q(".codex-rail-dynamic") || {}).textContent || ""));
 
+/* 原生 Discourse 侧边栏必须整条隐藏：它和 #main-outlet 平级、自己又没有背景色，
+   不隐藏就会把 Topics / Upcoming events / All categories 这些文字压在我们的 rail 上 */
+const nativeSidebar = q(".sidebar-wrapper");
+ok("原生侧边栏节点存在（前提成立）", !!nativeSidebar);
+ok("原生侧边栏已隐藏", !!nativeSidebar && getComputedStyle(nativeSidebar).display === "none",
+  nativeSidebar ? getComputedStyle(nativeSidebar).display : "无节点");
+const dSidebar = q("#d-sidebar");
+ok("原生侧边栏内容已隐藏", !!dSidebar && getComputedStyle(dSidebar).display === "none",
+  dSidebar ? getComputedStyle(dSidebar).display : "无节点");
+const nativeFooter = q(".sidebar-footer-wrapper");
+ok("原生侧边栏底栏已隐藏", !!nativeFooter && getComputedStyle(nativeFooter).display === "none",
+  nativeFooter ? getComputedStyle(nativeFooter).display : "无节点");
+
 /* ---------- 2. 伪装：标题 / 品牌名 / favicon ---------- */
 ok("标签页标题已伪装成源码文件名", document.title === "lib.rs — platform", document.title);
 ok("左栏品牌名 = Codex", (q("[data-brand-name]") || {}).textContent === "Codex", (q("[data-brand-name]") || {}).textContent);

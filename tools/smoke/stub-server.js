@@ -188,7 +188,17 @@ const PAGE = `<!doctype html>
     <li class="current-user"><a href="/u/tester" class="icon">tester</a></li>
   </ul>
 </div></div></header>
-<div id="main-outlet" class="wrap"><div id="main-outlet-inner"><p>原生内容（被锁定路由时应隐藏）</p></div></div>
+<div id="main-outlet-wrapper" class="wrap">
+  <!-- Discourse 的原生侧边栏：和 #main-outlet 平级，且自己没有背景色。
+       脚本必须把它整条隐藏，否则那些导航文字会压在自绘 rail 上。 -->
+  <div class="sidebar-wrapper">
+    <div id="d-sidebar" class="sidebar-container">
+      <span>Topics</span><span>Upcoming events</span>
+      <div class="sidebar-footer-wrapper"><span>All categories</span><span>Default</span></div>
+    </div>
+  </div>
+  <div id="main-outlet" class="wrap"><div id="main-outlet-inner"><p>原生内容（被锁定路由时应隐藏）</p></div></div>
+</div>
 <div id="reply-control" class="reply-area closed"><textarea></textarea></div>
 <script src="/linuxdo-codex.user.js"></script>
 </body>

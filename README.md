@@ -45,6 +45,7 @@
 
 - rail 配色按**实测有效对比度**重调：`#27353b` 底 + 灰字在深色下有效对比度只有 3.38:1，换成压暗的底色 + 近白文字（见 CSS Token 段注释）。
 - 新增设置项：品牌名、项目名、标签页图标（Codex 圆角图标 / 保留 linux.do 原图标）、应急键、缩略图尺寸、悬浮预览开关。
+- **隐藏原生 Discourse 侧边栏**：`Topics / Upcoming events / All categories / Default` 那一列（`.sidebar-wrapper` / `#d-sidebar`）在 DOM 里和 `#main-outlet` 平级、自己没有背景色，原来会直接压在自绘 rail 上；现在整条 `display: none`。
 
 数据流没有重写：`/latest.json`、`/categories.json`、`/t/<id>.json` 取数，DiscourseURL 软跳转，通知菜单收养、composer、阅读进度上报、书签、点赞、投票、引用跳源楼、CF 盾回退全部沿用上游那条线在 v0.3.1 里的实现。被改动的只有 48 行（都写在新脚本顶部的头注释里）。
 
@@ -70,9 +71,9 @@
 node tools/smoke/run.js
 ```
 
-覆盖 79 条断言，分两个阶段：
+覆盖 83 条断言，分两个阶段：
 
-1. **正常接管**（冒充 linux.do）：从 `/latest.json`、`/categories.json`、`/t/<id>.json` 渲染列表与详情；伪装标题/品牌名/favicon；应急键三种配置（Esc² / F2 / Ctrl+Shift+H）；侧边栏模式三种子开关（含「手动退出后自动伪装仍生效」「鼠标回来不撤手动进的伪装」）；设置面板落盘与 Esc 状态机；缩略图与悬浮预览；切语言后的标题联动；composer 输入与实时预览。
+1. **正常接管**（冒充 linux.do）：从 `/latest.json`、`/categories.json`、`/t/<id>.json` 渲染列表与详情；**原生侧边栏（`.sidebar-wrapper` / `#d-sidebar` / 底栏）被 `display:none`**；伪装标题/品牌名/favicon；应急键三种配置（Esc² / F2 / Ctrl+Shift+H）；侧边栏模式三种子开关（含「手动退出后自动伪装仍生效」「鼠标回来不撤手动进的伪装」）；设置面板落盘与 Esc 状态机；缩略图与悬浮预览；切语言后的标题联动；composer 输入与实时预览。
 2. **互斥让位**（页面上已有别的 Codex 主题 UI）：不注入样式、不加标记、不画第二套 rail/主区、不改标题与 favicon，也不接管对方那份 `.cx-modal`。
 
 > 注意：在有文件沙箱的环境里运行需要放开 `chrome.exe` 执行权限（脚本会启动 headless Chrome 并让它在系统临时目录建 profile）。

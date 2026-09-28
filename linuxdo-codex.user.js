@@ -2044,6 +2044,24 @@
       padding-top: 0 !important;
     }
 
+    /* ---------- 原生 Discourse 侧边栏：整条隐藏 ----------
+     *
+     * 它在 DOM 里是 #main-outlet-wrapper 的子节点、和 #main-outlet **平级**，
+     * 所以上面「只隐藏 #main-outlet 子节点」那条规则管不到它。它又没有自己的
+     * 背景色，于是 Topics / Upcoming events / All categories / Default 这些
+     * 原生导航文字会直接压在我们自绘的 rail 上（用户截图里的「残留」就是它）。
+     * 脚本自带 rail 就是导航，所以整条隐藏（含底部主题选择 / 分类快捷入口）。
+     */
+    .${ROOT_CLASS} .sidebar-wrapper,
+    .${ROOT_CLASS} #d-sidebar,
+    .${ROOT_CLASS} .sidebar-container,
+    .${ROOT_CLASS} .sidebar-footer-wrapper,
+    .${ROOT_CLASS} .sidebar-footer-container,
+    .${ROOT_CLASS} .sidebar-hamburger-dropdown,
+    .${ROOT_CLASS} .sidebar-more-section-links {
+      display: none !important;
+    }
+
     /* 底部聊天抽屉等会破坏观感，隐藏 */
     .${ROOT_CLASS} .chat-drawer-container,
     .${ROOT_CLASS} #chat-drawer,
