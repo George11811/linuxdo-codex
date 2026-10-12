@@ -3,7 +3,7 @@
 // @namespace    https://linux.do/
 // @version      1.0.0
 // @description  将 Linux DO 换成 Codex 桌面 app 风格：左 rail + 线程主区 + 右侧「代码面板」，明暗双模式；新增伪装模式（应急键 / 侧边栏模式）、缩略图与悬浮大图预览。仅改变外观，保留站点原有内容与交互。
-// @author       czm15053
+// @author       link
 // @match        https://linux.do/*
 // @icon         https://linux.do/favicon.ico
 // @grant        none
@@ -218,6 +218,16 @@
    */
   let sidebarAutoHide = null;
 
+  /**
+   * 正在拖拽中的三栏宽度状态（null = 没在拖）。
+   *
+   * 存在的理由有两个：
+   *   1. applyVisualSettings() 要据此跳过宽度变量，别把实时宽度顶回旧值；
+   *   2. 松手时按这里记下的数字落盘，而不是回头去读 CSS 变量 ——
+   *      变量在拖拽期间可能被别的路径写过。
+   */
+  let dragState = null;
+
   function loadSettings() {
     const out = Object.assign({}, DEFAULTS);
     // 1) 先吃旧键（迁移）
@@ -382,8 +392,12 @@
    */
   function applyVisualSettings() {
     const root = document.documentElement;
-    root.style.setProperty("--cx-rail-w", cfg("railWidth") + "px");
-    applyPanelWidth(cfg("panelWidth"));
+    // 拖拽期间跳过宽度变量：拖拽的值要等松手才落盘，这里若按旧值重写一遍，
+    // 手一停就被顶回去（见 applyTheme 里的 takingOver 注释）
+    if (!dragState) {
+      root.style.setProperty("--cx-rail-w", cfg("railWidth") + "px");
+      applyPanelWidth(cfg("panelWidth"));
+    }
     root.style.setProperty("--cx-thread-max", cfg("threadMaxWidth") + "px");
     root.style.setProperty("--ldx-thumb-w", cfg("thumbWidth") + "px");
     root.style.setProperty("--ldx-thumb-h", cfg("thumbHeight") + "px");
@@ -6356,34 +6370,60 @@
         const startW = kind === "rail"
           ? railW
           : (document.querySelector(".cx-code-panel")?.getBoundingClientRect().width || 500);
+        // 记下这一轮的两个宽度：拖哪个改哪个，另一个保持设置里的值
+        dragState = {
+          kind,
+          moved: false,
+          rail: Math.round(railW),
+          panel: cfg("panelWidth") > 0 ? Math.round(cfg("panelWidth")) : Math.round(startW)
+        };
         rz.classList.add("cx-dragging");
         document.body.classList.add("codex-resizing");
+
         const move = (ev) => {
+          if (!dragState) return;
+          dragState.moved = true;
           const dx = ev.clientX - startX;
-          if (kind === "rail") {
+          if (dragState.kind === "rail") {
             const w = Math.round(Math.min(Math.max(startW + dx, 240), Math.min(520, window.innerWidth * 0.34)));
+            dragState.rail = w;
             rootEl.style.setProperty("--cx-rail-w", w + "px");
           } else {
             const maxP = Math.max(320, window.innerWidth - railW - 420); // 中间栏至少留 420px
             const w = Math.round(Math.min(Math.max(startW - dx, 280), maxP));
+            dragState.panel = w;
             rootEl.style.setProperty("--cx-panel-w", w + "px");
           }
         };
-        const up = () => {
+
+        /**
+         * 结束拖拽。persist = 把最后看到的那对宽度落盘。
+         * pointerup / pointercancel / 窗口失焦都走这里：中途被打断时 dragState
+         * 必须清掉，否则 applyVisualSettings 会一直跳过宽度变量（宽度再也同步不了）。
+         */
+        const finish = () => {
           rz.classList.remove("cx-dragging");
           document.body.classList.remove("codex-resizing");
           document.removeEventListener("pointermove", move);
-          document.removeEventListener("pointerup", up);
+          document.removeEventListener("pointerup", finish);
+          document.removeEventListener("pointercancel", finish);
+          window.removeEventListener("blur", finish);
+          const state = dragState;
+          dragState = null;
+          // 只在真的拖动过之后才落盘：单纯点一下把手不该把「自动 1:1」钉成像素值
+          if (!state || !state.moved) return;
           // 两个宽度一次落盘：分开写会各跑一遍 applyVisualSettings，
           // 中间会把 --cx-panel-w 先清掉再写回来（白闪一下）
-          setCfgMany([
-            ["railWidth", Math.round(parseFloat(getComputedStyle(rootEl).getPropertyValue("--cx-rail-w")) || RAIL_WIDTH)],
-            // 面板变量没被拖过时是空的 → 落 0，保持「自动 1:1」而不是钉一个像素值
-            ["panelWidth", Math.round(parseFloat(getComputedStyle(rootEl).getPropertyValue("--cx-panel-w")) || 0)]
-          ]);
+          setCfgMany(state.kind === "rail"
+            ? [["railWidth", state.rail], ["panelWidth", cfg("panelWidth")]]
+            // 面板没被拖过时是 0 → 保持「自动 1:1」而不是钉一个像素值
+            : [["railWidth", cfg("railWidth")], ["panelWidth", state.panel]]);
         };
+
         document.addEventListener("pointermove", move);
-        document.addEventListener("pointerup", up);
+        document.addEventListener("pointerup", finish);
+        document.addEventListener("pointercancel", finish);
+        window.addEventListener("blur", finish);
       });
     });
   }
@@ -8041,12 +8081,20 @@ const THINK_CLOSERS = [
       return;
     }
 
+    // 这一趟是「从没接管 → 接管」吗？只有这种时刻才需要把设置整体重放一次。
+    // 不能每次 applyTheme 都跑 applyVisualSettings：它会把三栏宽度变量按
+    // localStorage 里**已落盘**的值重写，而拖拽期间的值还没落盘 ——
+    // 表现在用户那边就是「拖的时候不变，松手才跳一下」（Discourse 的 SPA
+    // 在拖拽期间会不断产生 DOM 变动 → MutationObserver → scheduleApply → applyTheme）。
+    const takingOver = !document.documentElement.classList.contains(ROOT_CLASS);
     injectStyle();
     syncCxMode();
     document.documentElement.classList.add(ROOT_CLASS);
-    // 让位期间 bootstrap 跳过了 applyVisualSettings（见那里的注释），
-    // 真正接管时在这里补一次：三栏宽度 / 主题 / 不透明度 / 面板显隐 / 标题与品牌名
-    applyVisualSettings();
+    if (takingOver) {
+      // 让位期间 bootstrap 跳过了 applyVisualSettings（见那里的注释），
+      // 真正接管时在这里补一次：三栏宽度 / 主题 / 不透明度 / 面板显隐 / 标题与品牌名
+      applyVisualSettings();
+    }
     makeFavicon();
     applySplash();
     if (!document.body) return;

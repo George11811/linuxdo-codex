@@ -267,4 +267,74 @@ if (detailScroller) {
   ok("详情滚动未抛异常", true);
 }
 
+/* ---------- 11. 三栏拖拽必须实时缩放 ----------
+ *
+ * 两个要点：
+ *   a. 按住不放（pointermove 之后、pointerup 之前）宽度就得跟着动；
+ *   b. 拖拽期间 Discourse 那边会不断产生 DOM 变动 → MutationObserver →
+ *      scheduleApply → applyTheme，这条链**不能**把还没落盘的实时宽度顶回旧值
+ *      （旧值只在松手时才写进 localStorage，所以顶回去的表现就是「松手才变」）。
+ */
+const pointer = (type, x, target, pointerId) => (target || document).dispatchEvent(
+  new PointerEvent(type, { bubbles: true, cancelable: true, clientX: x, clientY: 400, pointerId, buttons: 1, pointerType: "mouse" })
+);
+
+const railEl = q(".codex-rail");
+const railHandle = q('[data-resize="rail"]');
+const rw0 = railEl.getBoundingClientRect().width;
+pointer("pointerdown", 300, railHandle, 11);
+pointer("pointermove", 380, document, 11);
+await sleep(90);
+const rw1 = railEl.getBoundingClientRect().width;
+ok("左栏：按住不放就已经变宽", rw1 - rw0 > 40, Math.round(rw0) + " -> " + Math.round(rw1));
+/* 模拟 Discourse 在拖拽期间的 DOM 变动（外部节点，会触发 applyTheme） */
+q("#main-outlet-inner").appendChild(document.createElement("span"));
+await sleep(180);
+const rw2 = railEl.getBoundingClientRect().width;
+ok("左栏：拖拽期间外部重渲染不顶回宽度", Math.abs(rw2 - rw1) < 8, Math.round(rw1) + " -> " + Math.round(rw2));
+pointer("pointerup", 380, document, 11);
+await sleep(150);
+const rw3 = railEl.getBoundingClientRect().width;
+const savedAfterRail = readSettings().railWidth;
+ok("左栏：松手后宽度保持并落盘", Math.abs(rw3 - rw1) < 8 && Math.abs(savedAfterRail - rw3) < 2,
+  "width=" + Math.round(rw3) + " saved=" + savedAfterRail);
+
+const panelEl = q(".cx-code-panel");
+const panelHandle = q('[data-resize="panel"]');
+const pw0 = panelEl.getBoundingClientRect().width;
+pointer("pointerdown", 900, panelHandle, 12);
+pointer("pointermove", 800, document, 12);
+await sleep(90);
+const pw1 = panelEl.getBoundingClientRect().width;
+ok("代码面板：按住不放就已经变宽", pw1 - pw0 > 40, Math.round(pw0) + " -> " + Math.round(pw1));
+q("#main-outlet-inner").appendChild(document.createElement("span"));
+await sleep(180);
+const pw2 = panelEl.getBoundingClientRect().width;
+ok("代码面板：拖拽期间外部重渲染不顶回宽度", Math.abs(pw2 - pw1) < 8, Math.round(pw1) + " -> " + Math.round(pw2));
+pointer("pointerup", 800, document, 12);
+await sleep(150);
+const pw3 = panelEl.getBoundingClientRect().width;
+ok("代码面板：松手后宽度保持并落盘",
+  Math.abs(pw3 - pw1) < 8 && Math.abs(readSettings().panelWidth - pw3) < 2,
+  "width=" + Math.round(pw3) + " saved=" + readSettings().panelWidth);
+
+/* 拖拽中途被打断（pointercancel）不能把宽度锁死 */
+pointer("pointerdown", 300, railHandle, 13);
+pointer("pointermove", 340, document, 13);
+await sleep(60);
+pointer("pointercancel", 340, document, 13);
+await sleep(120);
+const rwAfterCancel = railEl.getBoundingClientRect().width;
+pointer("pointerdown", 300, railHandle, 14);
+pointer("pointermove", 360, document, 14);
+await sleep(80);
+const rwAfterSecondDrag = railEl.getBoundingClientRect().width;
+ok("拖拽被打断后还能继续拖", rwAfterSecondDrag - rwAfterCancel > 10,
+  Math.round(rwAfterCancel) + " -> " + Math.round(rwAfterSecondDrag));
+pointer("pointerup", 360, document, 14);
+await sleep(120);
+
+/* 复位，免得影响后续（本轮之后没有别的断言，只是保持环境干净） */
+document.documentElement.style.setProperty("--cx-rail-w", "306px");
+
 return { results: out };
