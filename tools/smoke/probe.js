@@ -337,4 +337,81 @@ await sleep(120);
 /* 复位，免得影响后续（本轮之后没有别的断言，只是保持环境干净） */
 document.documentElement.style.setProperty("--cx-rail-w", "306px");
 
+/* ---------- 12. 接口被拦时的兜底 ----------
+ *
+ * linux.do 挂在 Cloudflare 后面，`/latest.json` 这类 JSON 端点会间歇性回 403
+ * （页面 HTML 能打开，只有 XHR 被拦）。这里把四种情况都跑一遍：
+ *   a. 5xx → 重试一次就成功（且只多一次请求）；
+ *   b. CF 挑战 → 不重试，改用页面内预加载数据；
+ *   c. 预加载里也没有 → 改用原生 DOM 里已渲染的列表；
+ *   d. 都没有 → 明确的错误行。
+ */
+const ctlStats = async () => (await (await fetch("/__ctl/stats")).json());
+const countOf = (counts, p) => counts[p] || 0;
+const listTitles = () => qa(".cx-trow .cx-trow-title").map((el) => el.textContent);
+const statusLine = () => (q(".cx-thread-rows .cx-list-status") || {}).textContent || "";
+const goto = async (path) => {
+  history.pushState({}, "", path);
+  window.dispatchEvent(new PopStateEvent("popstate"));
+  await sleep(1200);
+};
+
+/* a. 一次 5xx → 重试 */
+await fetch("/__ctl/failnext?n=1");
+const cBefore = await ctlStats();
+await goto("/new");
+const cAfter = await ctlStats();
+ok("5xx 会重试一次并成功",
+  listTitles().length >= 5 && countOf(cAfter.counts, "/new.json") - countOf(cBefore.counts, "/new.json") === 2,
+  "行数=" + listTitles().length + " 请求=" + (countOf(cAfter.counts, "/new.json") - countOf(cBefore.counts, "/new.json")));
+ok("重试确实带了 _cx_retry", cAfter.retries - cBefore.retries === 1, "_cx_retry 次数=" + (cAfter.retries - cBefore.retries));
+
+/* b. CF 挑战 → 用 #data-preloaded 里的列表 */
+await fetch("/__ctl/block?on=1");
+const cB0 = await ctlStats();
+await goto("/top");
+const cB1 = await ctlStats();
+const titlesTop = listTitles();
+ok("CF 拦截时不重试（不把限流踩深）",
+  countOf(cB1.counts, "/top.json") - countOf(cB0.counts, "/top.json") === 1 && cB1.retries === cB0.retries,
+  "请求=" + (countOf(cB1.counts, "/top.json") - countOf(cB0.counts, "/top.json")) + " 重试=" + (cB1.retries - cB0.retries));
+ok("CF 拦截时改用页面内预加载数据", titlesTop.length > 0 && titlesTop.every((t) => t.startsWith("预加载·")),
+  titlesTop.slice(0, 2).join(" / ") + (titlesTop.length > 2 ? " …" : ""));
+ok("状态行说明了兜底来源", /预加载/.test(statusLine()), statusLine().slice(0, 40));
+
+/* c. 预加载里也没有 → 用原生 DOM 里已渲染的列表 */
+const pre = JSON.parse(q("#data-preloaded").getAttribute("data-preloaded"));
+delete pre.topicList_latest;
+q("#data-preloaded").setAttribute("data-preloaded", JSON.stringify(pre));
+q("#main-outlet-inner").innerHTML = `
+  <table class="topic-list"><tbody>
+    <tr class="topic-list-item" data-topic-id="3001"><td class="main-link">
+      <a class="title raw-topic-link" href="/t/native-one/3001">原生列表·第一条</a></td>
+      <td class="posts">7</td><td class="views">188</td>
+      <td class="activity"><span class="relative-date" title="2026-10-14T10:00:00.000Z">1 小时前</span></td></tr>
+    <tr class="topic-list-item unread pinned" data-topic-id="3002"><td class="main-link">
+      <a class="title raw-topic-link" href="/t/native-two/3002">原生列表·第二条</a></td>
+      <td class="posts">23</td><td class="views">904</td>
+      <td class="activity"><span class="relative-date" title="2026-10-14T08:30:00.000Z">2 小时前</span></td></tr>
+  </tbody></table>`;
+await goto("/hot");
+const titlesHot = listTitles();
+ok("预加载也没有时改用原生列表 DOM",
+  titlesHot.length === 2 && titlesHot.every((t) => t.startsWith("原生列表·")), titlesHot.join(" / "));
+ok("原生列表解析出的回复数正确", /23 回复/.test(q(".cx-thread-rows").textContent || ""), "含 23 回复");
+
+/* d. 两个兜底都没有 → 错误行 */
+q("#main-outlet-inner").innerHTML = "";
+const cD0 = await ctlStats();
+await goto("/bookmarks");
+const cD1 = await ctlStats();
+ok("兜底数据也没有时给出错误行",
+  /列表加载失败/.test(statusLine()) && !/预加载/.test(statusLine()), statusLine().slice(0, 46));
+ok("换路由会重新尝试（不被失败冷却卡住）",
+  countOf(cD1.counts, "/bookmarks.json") - countOf(cD0.counts, "/bookmarks.json") === 1,
+  "请求=" + (countOf(cD1.counts, "/bookmarks.json") - countOf(cD0.counts, "/bookmarks.json")));
+
+/* 这一节结束时故意让 CF 拦截保持打开：run.js 的第三阶段要在一个新页面里
+   验证「刚打开就被拦」时列表与详情都走预加载兜底。 */
+
 return { results: out };

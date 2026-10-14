@@ -560,13 +560,180 @@
     return `${date.getFullYear()}-${date.getMonth() + 1}-${date.getDate()}`;
   }
 
+  /**
+   * 这个响应是 Cloudflare 的挑战 / 拦截页，而不是 Discourse 的正常 JSON 吗？
+   *
+   * 判据（按可靠性排序）：
+   *   - cf-mitigated 头：CF 自己标的 challenge / block，最准；
+   *   - 403 + Content-Type: text/html：正常 JSON 接口不会这么回，
+   *     拿到 HTML 就说明中间被插了一页挑战/拦截。
+   * 用途不是「弹提示」而是「决定要不要重试」：CF 拦下来的请求重试多少次都没用，
+   * 只会把自己送进更深的限流，所以这种情况直接换成页面内的兜底数据。
+   */
+  function isCfChallenge(resp) {
+    try {
+      const mitigated = String(resp.headers.get("cf-mitigated") || "").toLowerCase();
+      if (mitigated === "challenge" || mitigated === "block") return true;
+      const type = String(resp.headers.get("content-type") || "").toLowerCase();
+      return resp.status === 403 && type.includes("text/html");
+    } catch {
+      return false;
+    }
+  }
+
+  /** 带状态的取数错误：调用方要按 status / cfChallenge 决定重试还是换路子 */
+  function apiError(status, cfChallenge) {
+    const err = new Error(`HTTP ${status}`);
+    err.status = status;
+    err.cfChallenge = !!cfChallenge;
+    return err;
+  }
+
   async function api(path, extraHeaders) {
     const resp = await fetch(path, {
-      headers: { Accept: "application/json", ...extraHeaders },
+      // X-Requested-With 跟站点自己的 XHR 口径一致。Cloudflare 的机器人规则
+      // 对「裸 fetch」和「XHR」的判定并不一样，加上这个头能明显减少 403。
+      headers: { Accept: "application/json", "X-Requested-With": "XMLHttpRequest", ...extraHeaders },
       credentials: "same-origin"
     });
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    if (!resp.ok) throw apiError(resp.status, isCfChallenge(resp));
     return resp.json();
+  }
+
+  /**
+   * 带重试的取数。
+   *
+   * 只在「看起来还有救」的时候重试：CF 挑战 / 4xx（除 408/429）直接放弃，
+   * 免得把限流踩得更深；网络抖动 / 5xx / 408 / 429 才重试一次，
+   * 并在第二次请求上挂一个 cache-buster —— CDN 有时会把一次 403 缓存住。
+   */
+  async function apiWithRetry(path, extraHeaders) {
+    try {
+      return await api(path, extraHeaders);
+    } catch (err) {
+      const retryable = !err.cfChallenge && (!err.status || err.status >= 500 ||
+        err.status === 408 || err.status === 429);
+      if (!retryable) throw err;
+      await new Promise((r) => setTimeout(r, 600));
+      const sep = path.includes("?") ? "&" : "?";
+      return api(`${path}${sep}_cx_retry=${Date.now()}`, extraHeaders);
+    }
+  }
+
+  /* ---- 接口被拦时的兜底数据源 ----------------------------------------------
+   *
+   * linux.do 挂在 Cloudflare 后面，`/latest.json` 之类的 JSON 端点偶尔会回 403
+   * （页面 HTML 本身能打开，只有 XHR 被拦）。这时候不能只剩一个错误框：
+   *   1. 页面里其实**已经有**站点自己预加载的 JSON（#data-preloaded）；
+   *   2. 站点自己渲染好的原生列表 / 帖子流也还在 DOM 里。
+   * 两个都试一遍，通常第一种就够（零请求、不可能被拦）。
+   * ---------------------------------------------------------------------- */
+
+  /** Discourse 把当前路由要用的数据塞在 #data-preloaded 里，值是「JSON 字符串套 JSON」 */
+  function readPreloadedJson(pick) {
+    try {
+      const el = document.getElementById("data-preloaded");
+      if (!el) return null;
+      const raw = el.getAttribute("data-preloaded") || el.textContent || "";
+      if (!raw) return null;
+      let map;
+      try { map = JSON.parse(raw); } catch { return null; }
+      if (!map || typeof map !== "object") return null;
+      for (const [key, value] of Object.entries(map)) {
+        let data = value;
+        if (typeof data === "string") {
+          try { data = JSON.parse(data); } catch { continue; }
+        }
+        if (!data || typeof data !== "object") continue;
+        try { if (pick(key, data)) return data; } catch { /* 单个 key 坏了不影响其它 */ }
+      }
+    } catch { /* ignore */ }
+    return null;
+  }
+
+  function preloadedTopicList() {
+    return readPreloadedJson((key, data) =>
+      /topic.?list/i.test(key) &&
+      data.topic_list && Array.isArray(data.topic_list.topics) && data.topic_list.topics.length > 0);
+  }
+
+  function preloadedTopic(topicId) {
+    return readPreloadedJson((key, data) => {
+      if (!data.post_stream || !Array.isArray(data.post_stream.posts) || !data.post_stream.posts.length) return false;
+      if (Number(data.id) === Number(topicId)) return true;
+      return new RegExp(`(^|_)${topicId}($|_)`).test(key) && /topic/i.test(key);
+    });
+  }
+
+  /** "2026-10-14 11:00:00 +0800" / ISO 都能吃，统一成 Date 能解析的字符串 */
+  function toIsoTime(text) {
+    if (!text) return "";
+    const s = String(text).trim();
+    if (/^\d{4}-\d{2}-\d{2}T/.test(s)) return s;
+    const m = s.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?\s*([+-]\d{2}:?\d{2})?/);
+    if (!m) return "";
+    const tz = (m[7] || "").replace(/^([+-]\d{2})(\d{2})$/, "$1:$2") || "Z";
+    return `${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:${m[6] || "00"}${tz}`;
+  }
+
+  /** 从 "23" / "1,234" / "188 views" 这类文本里取数字（linuxdo 这版没有通用的 num()） */
+  function numFromText(text) {
+    const m = String(text == null ? "" : text).replace(/,/g, "").match(/-?\d+/);
+    return m ? Number(m[0]) : 0;
+  }
+
+  /**
+   * 最后一道兜底：从站点**已经渲染好的**原生话题列表里读数据。
+   * 选择器写得比较宽（Discourse 各版本 class 名改过几轮），匹配不上就返回空数组，
+   * 调用方会退回错误提示 —— 不会比现在更糟。
+   */
+  function scrapeNativeTopicList() {
+    const out = [];
+    const seen = new Set();
+    const rows = document.querySelectorAll(
+      "#main-outlet .topic-list-item, #main-outlet tr[data-topic-id], .topic-list-item"
+    );
+    for (const row of rows) {
+      const link = row.querySelector("a.title, a.raw-topic-link, a.raw-link, .main-link a[href*='/t/']");
+      if (!link) continue;
+      const href = link.getAttribute("href") || "";
+      const m = href.match(/\/t\/([^/?#]+)\/(\d+)/);
+      const id = Number(row.getAttribute("data-topic-id")) || (m ? Number(m[2]) : 0);
+      const title = (link.textContent || "").trim();
+      if (!id || !title || seen.has(id)) continue;
+      seen.add(id);
+
+      const cellText = (sel) => {
+        const el = row.querySelector(sel);
+        return el ? el.textContent : "";
+      };
+      const timeEl = row.querySelector(".activity .relative-date, .relative-date, .age span[title], span[title]");
+      const catEl = row.querySelector("a.badge-category[href], .badge-category__wrapper[href], a[href^='/c/']");
+      const catId = catEl ? Number((String(catEl.getAttribute("href") || "").match(/\/(\d+)(?:[/?]|$)/) || [])[1]) || null : null;
+      const cls = String(row.className || "");
+      // 原生列表里那一格显示的是「回复数」，而我们的 trowHtml 用 posts_count - 1 去渲染它
+      // （见 trowHtml），所以这里 +1 换算一下：屏幕上看到的数字才能和原生列表一致。
+      const shownCount = numFromText(cellText(".posts, .num.posts, .badge-posts, .posts-map .number"));
+
+      out.push({
+        id,
+        title,
+        slug: m ? m[1] : "",
+        posts_count: Math.max(1, shownCount + 1),
+        views: numFromText(cellText(".views, .num.views")),
+        category_id: catId,
+        pinned: /\bpinned\b/.test(cls),
+        closed: /\bclosed\b/.test(cls),
+        unread: /\bunread\b/.test(cls) ? 1 : 0,
+        new_posts: /\bnew\b/.test(cls) ? 1 : 0,
+        last_activity_at: toIsoTime(timeEl ? (timeEl.getAttribute("title") || timeEl.textContent) : ""),
+        excerpt: (() => {
+          const ex = row.querySelector(".topic-excerpt");
+          return ex ? (ex.textContent || "").replace(/\s+/g, " ").trim().slice(0, 80) : "";
+        })()
+      });
+    }
+    return out;
   }
 
   /** 话题浏览上报头（对齐 Discourse 前端 trackNextAjaxAsTopicView，views +1 且服务端按天/IP 去重） */
@@ -1486,7 +1653,7 @@
     const topicId = threadState.topicId;
     if (!topicId) return;
     try {
-      const data = await api(`/t/${topicId}.json`);
+      const data = await apiWithRetry(`/t/${topicId}.json`);
       if (threadState.topicId !== topicId) return;
       const posts = (data.post_stream && data.post_stream.posts) || [];
       threadState.stream = (data.post_stream && data.post_stream.stream) || posts.map((p) => p.id);
@@ -4625,10 +4792,12 @@
   async function loadCategories() {
     if (categoriesCache) return categoriesCache;
     try {
-      const data = await api("/categories.json");
+      const data = await apiWithRetry("/categories.json");
       categoriesCache = (data.category_list && data.category_list.categories) || [];
     } catch {
-      categoriesCache = [];
+      // 被拦时退回页面内预加载的 site 数据（匿名也会带 categories）
+      const site = readPreloadedJson((key, data) => Array.isArray(data.categories) && data.categories.length > 0);
+      categoriesCache = (site && site.categories) || [];
     }
     return categoriesCache;
   }
@@ -4995,7 +5164,7 @@
       syncChrome();
     });
     if (!recentTopicsCache) {
-      api("/latest.json")
+      apiWithRetry("/latest.json")
         .then((data) => {
           recentTopicsCache = (data.topic_list && data.topic_list.topics) || [];
           renderRailDynamic();
@@ -5467,6 +5636,8 @@
     moreUrl: null,
     loading: false,
     failedAt: 0,
+    /** 兜底数据源生效时的一句话说明（显示在列表底部状态行），正常取数时为空 */
+    notice: "",
     topics: []
   };
 
@@ -5539,6 +5710,7 @@
     });
     rows.push(
       `<div class="cx-list-status">${
+        listState.notice ? escapeHtml(listState.notice) :
         listState.loading ? "加载中…" :
         listState.moreUrl ? "滚动加载更多…" :
         (listState.topics.length ? "没有更多了" : "暂无话题")
@@ -5564,6 +5736,31 @@
     renderListRows();
   }
 
+  /**
+   * 把「接口被拦」变成「换个数据源继续用」。
+   *
+   * 顺序：页面内预加载 JSON（零请求）→ 已渲染的原生列表 DOM。
+   * 成功就返回 true，并把来源写进 listState.notice 让底部状态行说明情况。
+   */
+  function recoverListData(err) {
+    const why = err && err.cfChallenge ? "被 Cloudflare 拦截" : `HTTP ${(err && err.status) || "?"}`;
+    const preloaded = preloadedTopicList();
+    if (preloaded) {
+      listState.notice = `列表接口${why}，已改用页面内预加载数据`;
+      applyListJson(preloaded, false);
+      return true;
+    }
+    const scraped = scrapeNativeTopicList();
+    if (scraped.length) {
+      listState.notice = `列表接口${why}，已改用原生列表里已渲染的数据`;
+      listState.moreUrl = null;
+      listState.topics = scraped;
+      renderListRows();
+      return true;
+    }
+    return false;
+  }
+
   async function loadList(apiPath, force) {
     if (!apiPath) return;
     // 用列表 API 做缓存键：进帖子时 pathname 会变，但不应重拉列表；
@@ -5574,25 +5771,35 @@
       return;
     }
     if (listState.loading) return;
-    // 失败冷却：10 秒内不重复请求（否则 Ember 的 DOM 抖动会触发 applyTheme → 重试风暴）
-    if (listState.failedAt && Date.now() - listState.failedAt < 10000) return;
+    // 换路由 = 用户主动导航，该重新试一次：失败冷却只用来抑制同一路由上的
+    // 「Ember DOM 抖动 → 重试风暴」，不该让 /top 一直显示 /new 的旧内容
+    if (listState.apiPath !== apiPath) listState.failedAt = 0;
+    // 失败冷却：30 秒内不重复请求（否则 Ember 的 DOM 抖动会触发 applyTheme → 重试风暴，
+    // 而 linux.do 的 403 多半就是被自己这一串请求喂出来的）
+    if (listState.failedAt && Date.now() - listState.failedAt < 30000) return;
     listState.loading = true;
     listState.apiPath = apiPath;
     listState.path = location.pathname;
+    listState.notice = "";
     renderListRows();
     try {
-      const data = await api(apiPath);
+      const data = await apiWithRetry(apiPath);
       if (listState.apiPath !== apiPath) return; // 路由已切走
       listState.failedAt = 0;
       applyListJson(data, false);
     } catch (err) {
+      if (listState.apiPath !== apiPath) return; // 路由已切走，别再动列表
       listState.failedAt = Date.now();
-      const status = /HTTP (\d+)/.exec(err && err.message || "")?.[1];
+      // 先试兜底数据源；实在没有才显示错误
+      if (recoverListData(err)) return;
+      const status = err && err.status;
       const box = document.querySelector(".cx-thread-rows");
       if (box) box.innerHTML = `<div class="cx-list-status">列表加载失败${
-        status === "403"
-          ? "（HTTP 403：可能被 Cloudflare 拦截或未登录，刷新页面或登录后重试）"
-          : status ? `（HTTP ${status}）` : ""
+        err && err.cfChallenge
+          ? "（被 Cloudflare 拦截：刷新页面过一下验证，或先登录再试）"
+          : status === 403
+            ? "（HTTP 403：可能被 Cloudflare 拦截或未登录，刷新页面或登录后重试）"
+            : status ? `（HTTP ${status}）` : "（网络错误）"
       }，点击重试</div>`;
       // 点错误行手动重试
       box?.querySelector(".cx-list-status")?.addEventListener("click", () => {
@@ -5608,9 +5815,14 @@
     if (!listState.moreUrl || listState.loading) return;
     listState.loading = true;
     try {
-      const data = await api(listState.moreUrl);
+      const data = await apiWithRetry(listState.moreUrl);
       applyListJson(data, true);
-    } catch { /* 保留现状 */ } finally {
+    } catch (err) {
+      // 加载更多被拦：不动已有内容，只在状态行说明（翻页没有「页面内兜底」可用）
+      listState.moreUrl = null;
+      listState.notice = `加载更多失败（${err && err.cfChallenge ? "被 Cloudflare 拦截" : `HTTP ${(err && err.status) || "?"}`}）`;
+      renderListRows();
+    } finally {
       listState.loading = false;
     }
   }
@@ -5799,7 +6011,7 @@
     const topicId = threadState.topicId;
     threadState.loading = true;
     try {
-      const data = await api(`/t/${topicId}/${n}.json`);
+      const data = await apiWithRetry(`/t/${topicId}/${n}.json`);
       if (threadState.topicId !== topicId) return; // 路由已切走
       const posts = (data.post_stream && data.post_stream.posts) || [];
       if (!posts.length) {
@@ -6949,6 +7161,51 @@ const THINK_CLOSERS = [
     if (scroller) scroller.scrollTop = keep;
   }
 
+  /**
+   * 把一份 topic JSON（接口拿到的，或页面内预加载的）灌进 threadState 并渲染。
+   * 抽出来是为了让「接口被 CF 拦 → 改用预加载数据」能走同一条渲染路径。
+   */
+  function applyTopicJson(data, topicId, box) {
+    const posts = (data.post_stream && data.post_stream.posts) || [];
+    threadState.stream = (data.post_stream && data.post_stream.stream) || posts.map((p) => p.id);
+    threadState.renderedFirstIdx = threadState.stream.indexOf(posts.length ? posts[0].id : -1);
+    if (threadState.renderedFirstIdx < 0) threadState.renderedFirstIdx = 0;
+    const lastLoadedId = posts.length ? posts[posts.length - 1].id : -1;
+    threadState.renderedLastIdx = threadState.stream.indexOf(lastLoadedId);
+    if (threadState.renderedLastIdx < 0) {
+      threadState.renderedLastIdx = threadState.renderedFirstIdx + Math.max(posts.length - 1, 0);
+    }
+    threadState.hasOlder = threadState.renderedFirstIdx > 0;
+    threadState.hasNewer = threadState.renderedLastIdx >= 0 &&
+      threadState.renderedLastIdx < threadState.stream.length - 1;
+    threadState.title = data.title || "";
+    threadState.slug = data.slug || "";
+    threadState.categoryId = data.category_id || null;
+    threadState.postsCount = data.posts_count || posts.length;
+    threadState.views = data.views || 0;
+    // 标题统一走 syncTitle()：伪装模式下要写成「源码文件名 — 项目名」，
+    // 直接写帖子标题会把伪装漏出去
+    syncTitle();
+
+    threadState.postsByNum = {};
+    for (const p of posts) {
+      if (p.post_number) threadState.postsByNum[p.post_number] = p;
+      if (p.id && postLiked(p)) likedPosts.add(p.id);
+    }
+
+    if (box) {
+      renderTurns(box, posts, "replace");
+      syncThreadDivider();
+      // 楼主在顶部，从头开始读
+      const scroller = document.querySelector(".cx-view-detail");
+      if (scroller) scroller.scrollTop = 0;
+    }
+    syncChrome();
+    // 话题 id 是代码面板的随机种子：换帖重排一份代码
+    renderCodePanel();
+    return posts.length;
+  }
+
   async function loadTopic(topicId) {
     if (!topicId || threadState.loading) return;
     if (threadState.topicId === topicId) {
@@ -6965,53 +7222,29 @@ const THINK_CLOSERS = [
     if (box) box.innerHTML = `<div class="cx-list-status">加载中…</div>`;
     syncChrome();
     try {
-      const data = await api(`/t/${topicId}.json`);
+      const data = await apiWithRetry(`/t/${topicId}.json`);
       if (threadState.topicId !== topicId) return; // 路由已切走
-      const posts = (data.post_stream && data.post_stream.posts) || [];
-      threadState.stream = (data.post_stream && data.post_stream.stream) || posts.map((p) => p.id);
-      threadState.renderedFirstIdx = threadState.stream.indexOf(posts.length ? posts[0].id : -1);
-      if (threadState.renderedFirstIdx < 0) threadState.renderedFirstIdx = 0;
-      const lastLoadedId = posts.length ? posts[posts.length - 1].id : -1;
-      threadState.renderedLastIdx = threadState.stream.indexOf(lastLoadedId);
-      if (threadState.renderedLastIdx < 0) {
-        threadState.renderedLastIdx = threadState.renderedFirstIdx + Math.max(posts.length - 1, 0);
-      }
-      threadState.hasOlder = threadState.renderedFirstIdx > 0;
-      threadState.hasNewer = threadState.renderedLastIdx >= 0 &&
-        threadState.renderedLastIdx < threadState.stream.length - 1;
-      threadState.title = data.title || "";
-      threadState.slug = data.slug || "";
-      threadState.categoryId = data.category_id || null;
-      threadState.postsCount = data.posts_count || posts.length;
-      threadState.views = data.views || 0;
-      // 标题统一走 syncTitle()：伪装模式下要写成「源码文件名 — 项目名」，
-      // 直接写帖子标题会把伪装漏出去
-      syncTitle();
-
-      for (const p of posts) {
-        if (p.post_number) threadState.postsByNum[p.post_number] = p;
-        if (p.id && postLiked(p)) likedPosts.add(p.id);
-      }
-
-      if (box) {
-        renderTurns(box, posts, "replace");
-        syncThreadDivider();
-        // 楼主在顶部，从头开始读
-        const scroller = document.querySelector(".cx-view-detail");
-        if (scroller) scroller.scrollTop = 0;
-      }
-      syncChrome();
-      // 话题 id 是代码面板的随机种子：换帖重排一份代码
-      renderCodePanel();
+      applyTopicJson(data, topicId, box);
       // 分类名异步到位后刷新面包屑与面板假路径
       if (!categoriesCache && threadState.categoryId) {
         loadCategories().then(() => { syncChrome(); codePanelLastSig = ""; renderCodePanel(); });
       }
     } catch (err) {
+      if (threadState.topicId !== topicId) return; // 路由已切走
+      // 接口被拦：帖子数据通常也已经在 #data-preloaded 里了（站点当前路由就是这条帖子）
+      const preloaded = preloadedTopic(topicId);
+      if (preloaded) {
+        applyTopicJson(preloaded, topicId, box);
+        cxToast("帖子接口被拦，已改用页面内预加载数据");
+        return;
+      }
       if (box) {
         box.innerHTML = `
           <div class="cx-list-status">
-            话题加载失败（${escapeHtml(err && err.message || "未知错误")}），可能无权限或已被删除
+            话题加载失败（${
+              err && err.cfChallenge ? "被 Cloudflare 拦截：刷新页面过一下验证再试"
+                : `HTTP ${(err && err.status) || "?"}`
+            }），可能无权限或已被删除
           </div>`;
       }
     } finally {
@@ -7033,7 +7266,7 @@ const THINK_CLOSERS = [
     const scroller = document.querySelector(".cx-view-detail");
     try {
       const qs = ids.map((id) => `post_ids[]=${id}`).join("&");
-      const data = await api(`/t/${threadState.topicId}/posts.json?${qs}`);
+      const data = await apiWithRetry(`/t/${threadState.topicId}/posts.json?${qs}`);
       const posts = sortPostsByStream(
         (data.post_stream && data.post_stream.posts) || data.posts || [],
         ids
@@ -7074,7 +7307,7 @@ const THINK_CLOSERS = [
     threadState.loading = true;
     try {
       const qs = ids.map((id) => `post_ids[]=${id}`).join("&");
-      const data = await api(`/t/${threadState.topicId}/posts.json?${qs}`);
+      const data = await apiWithRetry(`/t/${threadState.topicId}/posts.json?${qs}`);
       const posts = sortPostsByStream(
         (data.post_stream && data.post_stream.posts) || data.posts || [],
         ids

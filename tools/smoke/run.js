@@ -201,14 +201,28 @@ async function main() {
     }
     const results2 = (res2.result && res2.result.value && res2.result.value.results) || [];
 
+    // 第三阶段：整站 JSON 都被 CF 拦（probe.js 结束时故意留着 block），
+    // 全新加载一个帖子页，验证列表 + 详情都靠页面内预加载数据顶住。
+    // reset?block=1 = 清请求计数但保留拦截开关，这样第三阶段的计数是干净的。
+    await fetch(`http://127.0.0.1:${PORT}/__ctl/reset?block=1`);
+    await fetch(`http://127.0.0.1:${PORT}/__ctl/block?on=1`);
+    await cdp.send("Page.navigate", { url: `http://127.0.0.1:${PORT}/t/12345` }, 20000);
+    await sleep(3000);
+    const probe3 = fs.readFileSync(path.join(__dirname, "probe-blocked.js"), "utf8");
+    const res3 = await evaluate(cdp, `(async () => {\n${probe3}\n})()`);
+    if (res3.exceptionDetails) {
+      pageErrors.push("被拦阶段 probe 抛错：" + JSON.stringify(res3.exceptionDetails).slice(0, 800));
+    }
+    const results3 = (res3.result && res3.result.value && res3.result.value.results) || [];
+
     const pad = (s, n) => String(s).padEnd(n);
     console.log("\n=== linuxdo-codex 冒烟测试 ===");
     let failed = 0;
-    for (const r of [...results, ...results2]) {
+    for (const r of [...results, ...results2, ...results3]) {
       if (!r.pass) failed++;
       console.log(`${r.pass ? "PASS" : "FAIL"}  ${pad(r.name, 42)} ${r.detail}`);
     }
-    const total = results.length + results2.length;
+    const total = results.length + results2.length + results3.length;
     console.log(`\n断言：${total - failed}/${total} 通过`);
     if (pageErrors.length) {
       console.log("\n--- 页面异常 ---");

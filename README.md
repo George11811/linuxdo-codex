@@ -48,6 +48,16 @@
 - **隐藏原生 Discourse 侧边栏**：`Topics / Upcoming events / All categories / Default` 那一列（`.sidebar-wrapper` / `#d-sidebar`）在 DOM 里和 `#main-outlet` 平级、自己没有背景色，原来会直接压在自绘 rail 上；现在整条 `display: none`。
 - **三栏拖拽是真的实时**：按住不放宽度就跟着走；拖拽期间 Discourse 那边的 DOM 变动（→ `applyTheme`）不会再把还没落盘的宽度按旧设置顶回去。拖拽被 `pointercancel` / 窗口失焦打断时会正常收尾，不会把宽度锁死。
 
+**抗 Cloudflare 403（内容刷不出来）**
+
+linux.do 挂在 Cloudflare 后面，`/latest.json`、`/t/<id>.json` 这些 JSON 端点会间歇性回 403（页面 HTML 能打开，只有 XHR 被拦）。脚本现在有三层应对：
+
+1. **请求层**：GET 带上 `X-Requested-With: XMLHttpRequest`（和站点自己的 XHR 同口径，能明显减少被机器人规则误判）；网络抖动 / 5xx / 408 / 429 才重试一次（并挂 `_cx_retry` 参数绕开被缓存的错误响应）；**判定为 Cloudflare 挑战就完全不重试**，避免把限流踩得更深。同一路由的失败冷却从 10 秒放宽到 30 秒，换路由（用户主动导航）则立即重新尝试。
+2. **预加载兜底**：Discourse 会把当前路由的数据塞在 `#data-preloaded` 里（`topicList_latest`、`topic_<id>`、`site` 等）。接口被拦时直接用它 —— 零请求，不可能再被拦。
+3. **原生 DOM 兜底**：预加载也没有时，从站点**已经渲染好的**原生列表里解析（`.topic-list-item` / `a.title` / `.posts` / `.views` / `.relative-date`）。
+
+兜底生效时列表底部状态行会写明数据来源（例如「列表接口被 Cloudflare 拦截，已改用页面内预加载数据」）；三层都拿不到才显示错误行。
+
 数据流没有重写：`/latest.json`、`/categories.json`、`/t/<id>.json` 取数，DiscourseURL 软跳转，通知菜单收养、composer、阅读进度上报、书签、点赞、投票、引用跳源楼、CF 盾回退全部沿用上游那条线在 v0.3.1 里的实现。被改动的只有 48 行（都写在新脚本顶部的头注释里）。
 
 ## 与上游版本的关系
@@ -72,10 +82,11 @@
 node tools/smoke/run.js
 ```
 
-覆盖 90 条断言，分两个阶段：
+覆盖 106 条断言，分三个阶段：
 
-1. **正常接管**（冒充 linux.do）：从 `/latest.json`、`/categories.json`、`/t/<id>.json` 渲染列表与详情；**原生侧边栏（`.sidebar-wrapper` / `#d-sidebar` / 底栏）被 `display:none`**；伪装标题/品牌名/favicon；应急键三种配置（Esc² / F2 / Ctrl+Shift+H）；侧边栏模式三种子开关（含「手动退出后自动伪装仍生效」「鼠标回来不撤手动进的伪装」）；设置面板落盘与 Esc 状态机；缩略图与悬浮预览；切语言后的标题联动；composer 输入与实时预览；**左右两个把手拖拽期间就实时变宽（含「拖拽中外部重渲染不顶回宽度」「被打断后还能继续拖」）**。
+1. **正常接管**（冒充 linux.do）：从 `/latest.json`、`/categories.json`、`/t/<id>.json` 渲染列表与详情；**原生侧边栏（`.sidebar-wrapper` / `#d-sidebar` / 底栏）被 `display:none`**；伪装标题/品牌名/favicon；应急键三种配置（Esc² / F2 / Ctrl+Shift+H）；侧边栏模式三种子开关（含「手动退出后自动伪装仍生效」「鼠标回来不撤手动进的伪装」）；设置面板落盘与 Esc 状态机；缩略图与悬浮预览；切语言后的标题联动；composer 输入与实时预览；**左右两个把手拖拽期间就实时变宽（含「拖拽中外部重渲染不顶回宽度」「被打断后还能继续拖」）**；**接口 5xx 只重试一次、判成 Cloudflare 挑战就完全不重试**；**CF 拦截时列表改用 `#data-preloaded`、再退到原生列表 DOM 兜底，两者都没有才显示错误行**。
 2. **互斥让位**（页面上已有别的 Codex 主题 UI）：不注入样式、不加标记、不画第二套 rail/主区、不改标题与 favicon，也不接管对方那份 `.cx-modal`。
+3. **整站 JSON 被拦的新开页面**（`/__ctl/block` 打开后重新加载帖子页）：列表与详情都靠页面内预加载数据顶住，且全程零重试请求。
 
 > 注意：在有文件沙箱的环境里运行需要放开 `chrome.exe` 执行权限（脚本会启动 headless Chrome 并让它在系统临时目录建 profile）。
 > 断言若失败，退出码为 1，并打印页面异常与 `console.error`。

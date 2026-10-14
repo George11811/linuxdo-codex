@@ -1,13 +1,19 @@
 /*
  * 冒烟测试用的假 linux.do（Discourse）服务端。
  *
- * 只提供脚本真正会用到的那几个端点：
- *   /                     Discourse 外壳 HTML（#data-preloaded / #main-outlet / meta csrf）
- *   /t/12345              同一个外壳（脚本按 pathname 判定路由，服务端返回什么壳都行）
- *   /latest.json          topic_list.topics
- *   /categories.json      category_list.categories
- *   /t/12345.json         详情（post_stream.posts，含一张图片，用来验证缩略图/悬浮预览）
+ * 正常端点：
+ *   /                      Discourse 外壳 HTML（#data-preloaded / #main-outlet / meta csrf）
+ *   /t/12345               同一个外壳（脚本按 pathname 判定路由，服务端返回什么壳都行）
+ *   /latest.json 等        topic_list.topics
+ *   /categories.json       category_list.categories
+ *   /t/12345.json          详情（post_stream.posts，含一张图片，验证缩略图/悬浮预览）
  *   /linuxdo-codex.user.js 被测脚本本身
+ *
+ * 测试用控制端点（只有冒烟测试会调）：
+ *   /__ctl/stats           每个路径被请求了几次（用来断言「被 CF 拦时不要重试刷请求」）
+ *   /__ctl/block?on=1|0    打开后所有 .json 端点返回 403 + cf-mitigated: challenge（模拟 CF 拦截）
+ *   /__ctl/failnext?n=1    接下来 n 个 .json 请求回 500（用来验证「一次重试」）
+ *   /__ctl/reset           清零计数与控制开关
  *
  * 用法：node tools/smoke/stub-server.js [port]
  */
@@ -22,11 +28,7 @@ const ROOT = path.resolve(__dirname, "..", "..");
 const SCRIPT_PATH = path.join(ROOT, "linuxdo-codex.user.js");
 const PORT = Number(process.argv[2] || 8791);
 
-/**
- * 现造一张 400×300 的 PNG。
- * 为什么不是随便给 1×1：脚本会把「≤300×200 的图」标成 no-preview（表情/图标不弹大图），
- * 冒烟测试要验证的正是「大图 → 缩略图 + 悬浮预览」，所以图片必须真的够大。
- */
+/** 现造一张 400×300 的 PNG（脚本会把 ≤300×200 的图标成 no-preview，测试需要真大图） */
 function makePng(w, h) {
   const crc32 = zlib.crc32 || ((buf) => {
     let c, crc = 0xffffffff;
@@ -48,12 +50,12 @@ function makePng(w, h) {
   const ihdr = Buffer.alloc(13);
   ihdr.writeUInt32BE(w, 0);
   ihdr.writeUInt32BE(h, 4);
-  ihdr[8] = 8;  // bit depth
-  ihdr[9] = 2;  // color type: truecolor
+  ihdr[8] = 8;
+  ihdr[9] = 2;
   const raw = Buffer.alloc(h * (1 + w * 3));
   for (let y = 0; y < h; y++) {
     const off = y * (1 + w * 3);
-    raw[off] = 0; // filter: none
+    raw[off] = 0;
     for (let x = 0; x < w; x++) {
       raw[off + 1 + x * 3] = (x * 255 / w) | 0;
       raw[off + 2 + x * 3] = (y * 255 / h) | 0;
@@ -110,6 +112,13 @@ const TOPICS = [
   unseen: false,
   has_accepted_answer: false,
   posters: [{ user_id: 1 + i, description: "Original Poster" }]
+}));
+
+/** 页面内预加载的话题列表：标题带「预加载」标记，便于断言用的是哪一份数据 */
+const PRELOAD_TOPICS = TOPICS.slice(0, 4).map((t, i) => Object.assign({}, t, {
+  id: 2000 + i,
+  title: "预加载·" + t.title,
+  slug: "preloaded-" + (2000 + i)
 }));
 
 const TOPIC = {
@@ -171,14 +180,60 @@ const TOPIC = {
   }
 };
 
-const PAGE = `<!doctype html>
+/** 预加载里的详情副本：标题带标记，用来断言「接口被拦时用的是页面内数据」 */
+const PRELOAD_TOPIC = Object.assign({}, TOPIC, { title: TOPIC.title + "（预加载）" });
+
+/** Discourse 风格的原生话题列表（DOM 兜底路径要解析它） */
+const NATIVE_LIST_HTML = `
+<table class="topic-list">
+  <tbody>
+    <tr class="topic-list-item category-develop" data-topic-id="3001">
+      <td class="topic-list-data main-link">
+        <a class="title raw-link raw-topic-link" href="/t/native-one/3001">原生列表·第一条</a>
+      </td>
+      <td class="topic-list-data posts">7</td>
+      <td class="topic-list-data views">188</td>
+      <td class="topic-list-data activity"><span class="relative-date" title="2026-10-14T10:00:00.000Z">1 小时前</span></td>
+    </tr>
+    <tr class="topic-list-item unread pinned category-chat" data-topic-id="3002">
+      <td class="topic-list-data main-link">
+        <a class="title raw-link raw-topic-link" href="/t/native-two/3002">原生列表·第二条（置顶未读）</a>
+      </td>
+      <td class="topic-list-data posts">23</td>
+      <td class="topic-list-data views">904</td>
+      <td class="topic-list-data activity"><span class="relative-date" title="2026-10-14T08:30:00.000Z">2 小时前</span></td>
+    </tr>
+    <tr class="topic-list-item category-resource" data-topic-id="3003">
+      <td class="topic-list-data main-link">
+        <a class="title raw-link raw-topic-link" href="/t/native-three/3003">原生列表·第三条</a>
+      </td>
+      <td class="topic-list-data posts">2</td>
+      <td class="topic-list-data views">31</td>
+      <td class="topic-list-data activity"><span class="relative-date" title="2026-10-14T07:00:00.000Z">3 小时前</span></td>
+    </tr>
+  </tbody>
+</table>`;
+
+const PRELOAD_MAP = {
+  currentUser: JSON.stringify({ username: "tester", id: 7 }),
+  site: JSON.stringify({ categories: CATEGORIES }),
+  topicList_latest: JSON.stringify({ topic_list: { can_create_topic: true, per_page: 30, topics: PRELOAD_TOPICS, more_topics_url: null } }),
+  topic_12345: JSON.stringify(PRELOAD_TOPIC)
+};
+
+/** 外壳 HTML。opts.nativeList = 在 #main-outlet 里摆一份原生话题列表；opts.preload = 覆盖预加载表 */
+function page(opts) {
+  const o = opts || {};
+  const preload = o.preload || PRELOAD_MAP;
+  const preloadAttr = JSON.stringify(preload).replace(/'/g, "&#39;");
+  return `<!doctype html>
 <html class="dark-scheme">
 <head>
 <meta charset="utf-8">
 <title>Linux DO</title>
 <meta name="csrf-token" content="smoke-csrf-token">
 <link rel="icon" href="/favicon.ico">
-<script id="data-preloaded" data-preloaded='{"currentUser":"{\\"username\\":\\"tester\\",\\"id\\":7}"}'></script>
+<script id="data-preloaded" data-preloaded='${preloadAttr}'></script>
 </head>
 <body>
 <div id="d-splash"><div class="splash-logo-container"></div></div>
@@ -197,19 +252,23 @@ const PAGE = `<!doctype html>
       <div class="sidebar-footer-wrapper"><span>All categories</span><span>Default</span></div>
     </div>
   </div>
-  <div id="main-outlet" class="wrap"><div id="main-outlet-inner"><p>原生内容（被锁定路由时应隐藏）</p></div></div>
+  <div id="main-outlet" class="wrap"><div id="main-outlet-inner">
+    <p>原生内容（被锁定路由时应隐藏）</p>
+    ${o.nativeList ? NATIVE_LIST_HTML : ""}
+  </div></div>
 </div>
 <div id="reply-control" class="reply-area closed"><textarea></textarea></div>
 <script src="/linuxdo-codex.user.js"></script>
 </body>
 </html>`;
+}
 
 /*
- * 「另一份 Codex 主题脚本已经接管」的页面：
- * body 里先摆一套不带归属标记的 .codex-rail / .codex-main（= 旧版 linuxdo.user.js 画的），
+ * 「另一份 Codex 主题脚本已经接管」的页面：body 里先摆一套不带归属标记的
+ * .codex-rail / .codex-main / .cx-modal（= 旧版 linuxdo.user.js 画的），
  * 再加载本脚本。本脚本必须让位：不加 ROOT_CLASS、不再画第二套 UI。
  */
-const FOREIGN_PAGE = PAGE.replace(
+const FOREIGN_PAGE = page().replace(
   '<div id="reply-control"',
   '<aside class="codex-rail" id="foreign-rail"><div class="codex-rail-brand-name">旧的 Linux DO 皮肤</div></aside>\n' +
   '<main class="codex-main" id="foreign-main"><div class="codex-thread-inner">旧的皮肤主区</div></main>\n' +
@@ -217,28 +276,75 @@ const FOREIGN_PAGE = PAGE.replace(
   '<div id="reply-control"'
 );
 
-function sendJson(res, obj, code) {
+/* ---- 测试控制状态 ---- */
+const ctl = { blockJson: false, failNext: 0 };
+const stats = { counts: Object.create(null), total: 0, retries: 0 };
+
+function sendJson(res, obj, code, extraHeaders) {
   const body = JSON.stringify(obj);
-  res.writeHead(code || 200, {
+  res.writeHead(code || 200, Object.assign({
     "Content-Type": "application/json; charset=utf-8",
     "Content-Length": Buffer.byteLength(body)
-  });
+  }, extraHeaders || {}));
   res.end(body);
 }
 
-function sendHtml(res, html) {
-  res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-  res.end(html);
+function sendHtml(res, html, code, extraHeaders) {
+  const body = Buffer.from(html);
+  res.writeHead(code || 200, Object.assign({
+    "Content-Type": "text/html; charset=utf-8",
+    "Content-Length": body.length
+  }, extraHeaders || {}));
+  res.end(body);
+}
+
+/** 模拟 Cloudflare 的挑战响应：403 + cf-mitigated + HTML 正文 */
+function sendCfChallenge(res) {
+  sendHtml(res, "<html><body>Just a moment...</body></html>", 403, { "cf-mitigated": "challenge", server: "cloudflare" });
 }
 
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, "http://127.0.0.1");
   const p = url.pathname;
+  stats.counts[p] = (stats.counts[p] || 0) + 1;
+  stats.total++;
+  // 带 _cx_retry 的请求 = 脚本的重试请求（用来断言「CF 拦下来时没有重试」）
+  if (url.searchParams.has("_cx_retry")) stats.retries++;
+
+  /* ---- 测试控制端点 ---- */
+  if (p === "/__ctl/stats") return sendJson(res, { counts: stats.counts, total: stats.total, retries: stats.retries, ctl });
+  if (p === "/__ctl/block") {
+    ctl.blockJson = url.searchParams.get("on") === "1";
+    return sendJson(res, { blockJson: ctl.blockJson });
+  }
+  if (p === "/__ctl/failnext") {
+    ctl.failNext = Number(url.searchParams.get("n") || 1);
+    return sendJson(res, { failNext: ctl.failNext });
+  }
+  if (p === "/__ctl/reset") {
+    // ?block=1 = 只清计数，保留当前的拦截开关（第三阶段要在「已拦截」状态下开新页面）
+    if (url.searchParams.get("block") !== "1") ctl.blockJson = false;
+    ctl.failNext = 0;
+    stats.counts = Object.create(null);
+    stats.total = 0;
+    stats.retries = 0;
+    return sendJson(res, { ok: true, blockJson: ctl.blockJson });
+  }
 
   if (p === "/linuxdo-codex.user.js") {
     const body = fs.readFileSync(SCRIPT_PATH);
     res.writeHead(200, { "Content-Type": "text/javascript; charset=utf-8", "Content-Length": body.length });
     return res.end(body);
+  }
+
+  // 「接下来 n 个 JSON 请求失败」（验证重试：第一次 500、retry 拿到 200）
+  if (/\.json$/.test(p) && ctl.failNext > 0) {
+    ctl.failNext--;
+    return sendJson(res, { errors: ["simulated server error"] }, 500);
+  }
+  // CF 拦截模式：JSON 端点全部 403 挑战页
+  if (/\.json$/.test(p) && ctl.blockJson) {
+    return sendCfChallenge(res);
   }
 
   if (p === "/latest.json" || p === "/top.json" || p === "/hot.json" || p === "/new.json" ||
@@ -279,11 +385,18 @@ const server = http.createServer((req, res) => {
   // 「另一份 Codex 主题已接管」的页面：本脚本应当让位
   if (p === "/foreign") return sendHtml(res, FOREIGN_PAGE);
 
-  if (p === "/" || /^\/t\/\d+/.test(p) || /^\/(latest|new|top|hot|unread|c\/|tag\/)/.test(p)) {
-    return sendHtml(res, PAGE);
+  // /scrape：预加载里没有列表数据，但原生 DOM 里有 —— 用来测 DOM 兜底
+  if (p === "/scrape") {
+    const map = Object.assign({}, PRELOAD_MAP);
+    delete map.topicList_latest;
+    return sendHtml(res, page({ nativeList: true, preload: map }));
   }
 
-  return sendHtml(res, PAGE);
+  if (p === "/" || /^\/t\/\d+/.test(p) || /^\/(latest|new|top|hot|unread|c\/|tag\/)/.test(p)) {
+    return sendHtml(res, page());
+  }
+
+  return sendHtml(res, page());
 });
 
 server.listen(PORT, "127.0.0.1", () => {
