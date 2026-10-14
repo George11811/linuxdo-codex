@@ -5593,13 +5593,18 @@
       const title = threadState.title || "加载中…";
       const cat = threadState.categoryId ? categoryById(threadState.categoryId) : null;
       if (proj) proj.textContent = cat ? cat.name : "话题";
-      if (model) model.textContent = `${title} · ${threadState.postsCount || "–"} 楼`;
+      if (model) {
+        model.textContent = `${title} · ${threadState.postsCount || "–"} 楼`;
+        // 顶栏那一行是 ellipsis 截断的：把完整标题挂成悬停提示，长标题才看得全
+        model.title = threadState.title || "";
+      }
       if (mdEdit) mdEdit.dataset.placeholder = `回复「${title}」…`;
     } else {
       const title = listTitleForPath(pathname);
       if (proj) proj.textContent = title;
       if (model) model.textContent = `全部线程 · ${listState.topics.length || "–"}`;
       if (h1 && h1.textContent !== title) h1.textContent = title;
+      if (h1) h1.title = title;
       if (desc) {
         const catId = categoryIdFromPath(pathname);
         const cat = catId ? categoryById(catId) : null;
@@ -5645,19 +5650,26 @@
     const unread = topicUnread(topic);
     const replies = Math.max(0, (topic.posts_count || 1) - 1);
     const cat = topic.category_id ? categoryById(topic.category_id) : null;
-    const sub = topic.excerpt
-      ? String(topic.excerpt).replace(/<[^>]*>/g, "").replace(/\s+/g, " ").trim().slice(0, 60)
+    const title = topic.title || "";
+    // 副行只显示 60 字摘要（CSS 还会再 ellipsis 一刀），完整摘要留给悬停提示；
+    // 没有摘要时副行退回「分类 · 最后回复人」，这种情况没有可提示的长文本
+    const fullExcerpt = topic.excerpt
+      ? String(topic.excerpt).replace(/<[^>]*>/g, "").replace(/\s+/g, " ").trim()
+      : "";
+    const sub = fullExcerpt
+      ? fullExcerpt.slice(0, 60)
       : [cat && cat.name, topic.last_poster_username && `@${topic.last_poster_username}`]
           .filter(Boolean).join(" · ");
     const status = topic.pinned
       ? `<span class="cx-trow-pin">${ICONS.pin}</span>`
       : `<span class="cx-trow-dot${unread ? " cx-unread" : ""}"></span>`;
+    // title 属性 = 原生列表那个悬停显示全文的行为：标题被 CSS 截断后，鼠标停上去能看全
     return `
-      <div class="cx-trow${unread ? "" : " cx-read"}" data-href="${escapeHtml(topicHref(topic))}" data-topic-id="${topic.id}">
+      <div class="cx-trow${unread ? "" : " cx-read"}" data-href="${escapeHtml(topicHref(topic))}" data-topic-id="${topic.id}" title="${escapeHtml(title)}">
         ${status}
         <div class="cx-trow-texts">
-          <div class="cx-trow-title">${escapeHtml(topic.title)}</div>
-          ${sub ? `<div class="cx-trow-sub">${escapeHtml(sub)}</div>` : ""}
+          <div class="cx-trow-title" title="${escapeHtml(title)}">${escapeHtml(title)}</div>
+          ${sub ? `<div class="cx-trow-sub" title="${escapeHtml(fullExcerpt || sub)}">${escapeHtml(sub)}</div>` : ""}
         </div>
         <div class="cx-trow-meta">
           <span>${replies} 回复</span>

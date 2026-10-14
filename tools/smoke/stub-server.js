@@ -106,7 +106,7 @@ const TOPICS = [
   last_posted_at: new Date(Date.now() - i * 900e3).toISOString(),
   last_activity_at: new Date(Date.now() - i * 900e3).toISOString(),
   last_poster_username,
-  excerpt: "这是列表摘要，用来验证副行渲染。",
+  excerpt: "这是一段刻意写得很长的列表摘要，用来验证副行只显示前六十个字，而完整摘要会出现在鼠标悬停提示里，跟前端原生列表的行为保持一致。",
   unread: i % 4 === 0 ? 3 : 0,
   new_posts: 0,
   unseen: false,

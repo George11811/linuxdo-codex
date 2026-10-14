@@ -30,6 +30,18 @@ ok("列表从 /latest.json 渲染出行", qa(".cx-trow").length >= 5, qa(".cx-tr
 ok("列表标题正确", (q(".cx-proj-head h1") || {}).textContent === "最新", (q(".cx-proj-head h1") || {}).textContent);
 ok("rail 分类分组渲染", /开发调优/.test((q(".codex-rail-dynamic") || {}).textContent || ""));
 
+/* 悬停提示：标题被 CSS 截断后，鼠标停上去要能看全（原生列表的 title 属性行为） */
+const row0 = q(".cx-thread-rows .cx-trow");
+const title0 = row0 && row0.querySelector(".cx-trow-title");
+const sub0 = row0 && row0.querySelector(".cx-trow-sub");
+ok("列表行带完整标题的悬停提示",
+  !!row0 && !!title0 && row0.getAttribute("title") === title0.textContent &&
+  title0.getAttribute("title") === title0.textContent,
+  title0 ? JSON.stringify(title0.getAttribute("title")).slice(0, 40) : "无节点");
+ok("副行是截断摘要 + 完整摘要的悬停提示",
+  !!sub0 && (sub0.textContent || "").length <= 60 && (sub0.getAttribute("title") || "").length > 60,
+  sub0 ? `显示 ${sub0.textContent.length} 字 / 提示 ${(sub0.getAttribute("title") || "").length} 字` : "无节点");
+
 /* 原生 Discourse 侧边栏必须整条隐藏：它和 #main-outlet 平级、自己又没有背景色，
    不隐藏就会把 Topics / Upcoming events / All categories 这些文字压在我们的 rail 上 */
 const nativeSidebar = q(".sidebar-wrapper");

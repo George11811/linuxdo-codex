@@ -46,6 +46,7 @@
 - rail 配色按**实测有效对比度**重调：`#27353b` 底 + 灰字在深色下有效对比度只有 3.38:1，换成压暗的底色 + 近白文字（见 CSS Token 段注释）。
 - 新增设置项：品牌名、项目名、标签页图标（Codex 圆角图标 / 保留 linux.do 原图标）、应急键、缩略图尺寸、悬浮预览开关。
 - **隐藏原生 Discourse 侧边栏**：`Topics / Upcoming events / All categories / Default` 那一列（`.sidebar-wrapper` / `#d-sidebar`）在 DOM 里和 `#main-outlet` 平级、自己没有背景色，原来会直接压在自绘 rail 上；现在整条 `display: none`。
+- **长标题悬停看全**：列表行的标题是 `ellipsis` 截断的，行和标题上都挂了 `title` 属性（原生列表就是这么做）；副行只显示 60 字摘要、悬停给出完整摘要；帖子页顶栏面包屑同理。
 - **三栏拖拽是真的实时**：按住不放宽度就跟着走；拖拽期间 Discourse 那边的 DOM 变动（→ `applyTheme`）不会再把还没落盘的宽度按旧设置顶回去。拖拽被 `pointercancel` / 窗口失焦打断时会正常收尾，不会把宽度锁死。
 
 **抗 Cloudflare 403（内容刷不出来）**
@@ -82,9 +83,9 @@ linux.do 挂在 Cloudflare 后面，`/latest.json`、`/t/<id>.json` 这些 JSON 
 node tools/smoke/run.js
 ```
 
-覆盖 106 条断言，分三个阶段：
+覆盖 108 条断言，分三个阶段：
 
-1. **正常接管**（冒充 linux.do）：从 `/latest.json`、`/categories.json`、`/t/<id>.json` 渲染列表与详情；**原生侧边栏（`.sidebar-wrapper` / `#d-sidebar` / 底栏）被 `display:none`**；伪装标题/品牌名/favicon；应急键三种配置（Esc² / F2 / Ctrl+Shift+H）；侧边栏模式三种子开关（含「手动退出后自动伪装仍生效」「鼠标回来不撤手动进的伪装」）；设置面板落盘与 Esc 状态机；缩略图与悬浮预览；切语言后的标题联动；composer 输入与实时预览；**左右两个把手拖拽期间就实时变宽（含「拖拽中外部重渲染不顶回宽度」「被打断后还能继续拖」）**；**接口 5xx 只重试一次、判成 Cloudflare 挑战就完全不重试**；**CF 拦截时列表改用 `#data-preloaded`、再退到原生列表 DOM 兜底，两者都没有才显示错误行**。
+1. **正常接管**（冒充 linux.do）：从 `/latest.json`、`/categories.json`、`/t/<id>.json` 渲染列表与详情；**原生侧边栏（`.sidebar-wrapper` / `#d-sidebar` / 底栏）被 `display:none`**；**列表行带完整标题的悬停提示、副行是「截断显示 + 完整摘要提示」**；伪装标题/品牌名/favicon；应急键三种配置（Esc² / F2 / Ctrl+Shift+H）；侧边栏模式三种子开关（含「手动退出后自动伪装仍生效」「鼠标回来不撤手动进的伪装」）；设置面板落盘与 Esc 状态机；缩略图与悬浮预览；切语言后的标题联动；composer 输入与实时预览；**左右两个把手拖拽期间就实时变宽（含「拖拽中外部重渲染不顶回宽度」「被打断后还能继续拖」）**；**接口 5xx 只重试一次、判成 Cloudflare 挑战就完全不重试**；**CF 拦截时列表改用 `#data-preloaded`、再退到原生列表 DOM 兜底，两者都没有才显示错误行**。
 2. **互斥让位**（页面上已有别的 Codex 主题 UI）：不注入样式、不加标记、不画第二套 rail/主区、不改标题与 favicon，也不接管对方那份 `.cx-modal`。
 3. **整站 JSON 被拦的新开页面**（`/__ctl/block` 打开后重新加载帖子页）：列表与详情都靠页面内预加载数据顶住，且全程零重试请求。
 
