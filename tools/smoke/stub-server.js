@@ -276,6 +276,29 @@ const FOREIGN_PAGE = page().replace(
   '<div id="reply-control"'
 );
 
+/*
+ * Cloudflare 挑战页：整页都是 CF 的中间页（`@match` 仍会命中，所以脚本确实会在
+ * 这上面跑）。脚本必须彻底安静：不注入 UI、不改标题、不换 favicon、一个请求都不发。
+ */
+const CHALLENGE_PAGE = `<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Just a moment...</title>
+<link rel="icon" href="/favicon.ico">
+</head>
+<body class="no-js">
+<div id="challenge-running" class="main-wrapper" role="main">
+  <h1>Verifying you are human</h1>
+  <p>This may take a few seconds…</p>
+  <form id="challenge-form" action="/cdn-cgi/challenge-platform/h/b/orchestrate/chl_page/v1" method="POST">
+    <input type="hidden" id="cf-chl-widget-abc123_response" name="cf-turnstile-response" value="">
+  </form>
+</div>
+<script src="/linuxdo-codex.user.js"></script>
+</body>
+</html>`;
+
 /* ---- 测试控制状态 ---- */
 const ctl = { blockJson: false, failNext: 0 };
 const stats = { counts: Object.create(null), total: 0, retries: 0 };
@@ -384,6 +407,9 @@ const server = http.createServer((req, res) => {
 
   // 「另一份 Codex 主题已接管」的页面：本脚本应当让位
   if (p === "/foreign") return sendHtml(res, FOREIGN_PAGE);
+
+  // CF 挑战中间页：脚本必须完全不动作（见 CHALLENGE_PAGE 注释）
+  if (p === "/challenge") return sendHtml(res, CHALLENGE_PAGE);
 
   // /scrape：预加载里没有列表数据，但原生 DOM 里有 —— 用来测 DOM 兜底
   if (p === "/scrape") {

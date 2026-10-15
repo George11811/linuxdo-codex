@@ -215,14 +215,26 @@ async function main() {
     }
     const results3 = (res3.result && res3.result.value && res3.result.value.results) || [];
 
+    // 第四阶段：整页是 CF 挑战中间页 → 脚本必须彻底安静（不改标题、不换标、零请求）。
+    // 先清计数并关掉「接口拦截」开关（这一阶段要验证的是「页面本身就是挑战页」）。
+    await fetch(`http://127.0.0.1:${PORT}/__ctl/reset`);
+    await cdp.send("Page.navigate", { url: `http://127.0.0.1:${PORT}/challenge` }, 20000);
+    await sleep(1500);
+    const probe4 = fs.readFileSync(path.join(__dirname, "probe-challenge.js"), "utf8");
+    const res4 = await evaluate(cdp, `(async () => {\n${probe4}\n})()`);
+    if (res4.exceptionDetails) {
+      pageErrors.push("挑战页阶段 probe 抛错：" + JSON.stringify(res4.exceptionDetails).slice(0, 800));
+    }
+    const results4 = (res4.result && res4.result.value && res4.result.value.results) || [];
+
     const pad = (s, n) => String(s).padEnd(n);
     console.log("\n=== linuxdo-codex 冒烟测试 ===");
     let failed = 0;
-    for (const r of [...results, ...results2, ...results3]) {
+    for (const r of [...results, ...results2, ...results3, ...results4]) {
       if (!r.pass) failed++;
       console.log(`${r.pass ? "PASS" : "FAIL"}  ${pad(r.name, 42)} ${r.detail}`);
     }
-    const total = results.length + results2.length + results3.length;
+    const total = results.length + results2.length + results3.length + results4.length;
     console.log(`\n断言：${total - failed}/${total} 通过`);
     if (pageErrors.length) {
       console.log("\n--- 页面异常 ---");

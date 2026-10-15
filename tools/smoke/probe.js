@@ -279,6 +279,88 @@ if (detailScroller) {
   ok("详情滚动未抛异常", true);
 }
 
+/* ---------- 10.5 底部输入框的收起 / 展开 ---------- */
+const cWrap = q(".codex-composer-wrap");
+const cEditor = q(".codex-composer .cx-md-edit");
+const collapseBtn = q('.codex-composer [data-composer-toggle="collapse"]');
+const miniBar = q(".codex-composer .cx-composer-mini");
+const expandBtn = q('.codex-composer [data-composer-toggle="expand"]');
+ok("工具栏里有收起按钮、细栏里有展开按钮", !!collapseBtn && !!expandBtn && !!miniBar);
+const wrapH0 = cWrap.getBoundingClientRect().height;
+ok("默认是展开态", !!cEditor && getComputedStyle(cEditor).display !== "none" && getComputedStyle(miniBar).display === "none",
+  "editor=" + (cEditor ? getComputedStyle(cEditor).display : "无") + " mini=" + (miniBar ? getComputedStyle(miniBar).display : "无"));
+
+collapseBtn.click();
+await sleep(150);
+const wrapH1 = cWrap.getBoundingClientRect().height;
+ok("点收起后输入框隐藏、细栏显示",
+  getComputedStyle(cEditor).display === "none" && getComputedStyle(miniBar).display === "flex",
+  "editor=" + getComputedStyle(cEditor).display + " mini=" + getComputedStyle(miniBar).display);
+ok("收起后确实变矮", wrapH1 < wrapH0 - 40, Math.round(wrapH0) + " -> " + Math.round(wrapH1));
+ok("收起状态已落盘", readSettings().composerCollapsed === true, JSON.stringify(readSettings().composerCollapsed));
+ok("细栏上给出了提示文案", (q("[data-composer-hint]") || {}).textContent.length > 0,
+  (q("[data-composer-hint]") || {}).textContent);
+
+expandBtn.click();
+await sleep(150);
+ok("点展开箭头后恢复", getComputedStyle(cEditor).display !== "none" && getComputedStyle(miniBar).display === "none");
+ok("展开状态已落盘", readSettings().composerCollapsed === false, JSON.stringify(readSettings().composerCollapsed));
+
+/* 收起 → 点「回复」某楼：必须自动展开（否则回复入口等于被藏了） */
+collapseBtn.click();
+await sleep(120);
+const replyBtn = q(".cx-act[data-action='reply']") || q(".cx-act");
+replyBtn?.click();
+await sleep(220);
+ok("收起时点「回复」会自动展开", getComputedStyle(cEditor).display !== "none",
+  "editor=" + getComputedStyle(cEditor).display);
+ok("回复目标条同时出现（说明确实进了回复流程）",
+  !!q(".codex-composer .cx-compose-target.active"), (q(".cx-compose-target") || {}).className);
+
+/* 再收起，验证换路由后状态保持 */
+collapseBtn.click();
+await sleep(120);
+history.pushState({}, "", "/t/12345");
+window.dispatchEvent(new PopStateEvent("popstate"));
+await sleep(400);
+ok("换路由后仍是收起态", q(".codex-composer").classList.contains("cx-collapsed"),
+  q(".codex-composer").className);
+/* 复位成展开，免得影响后续断言 */
+expandBtn.click();
+await sleep(150);
+ok("复位为展开态", !q(".codex-composer").classList.contains("cx-collapsed"));
+
+/* ---------- 10.6 工具条不能溢出被裁（右端按钮要看得全）----------
+ *
+ * 工具条是 nowrap 弹性行，外层 .codex-body 有 overflow:hidden：
+ * 固有宽度超过卡片时，右端的收起 / 发送按钮会被直接裁掉。
+ * 这里量 scrollWidth vs clientWidth，并顺手核对最右侧按钮是否落在卡片里。 */
+const toolbarFits = (label) => {
+  const bar = q(".cx-composer-toolbar");
+  const card = q(".codex-composer");
+  const sendBtn = q(".codex-composer-send");
+  const collapse = q('[data-composer-toggle="collapse"]');
+  const barBox = bar.getBoundingClientRect();
+  const cardBox = card.getBoundingClientRect();
+  const sendBox = sendBtn.getBoundingClientRect();
+  const collapseBox = collapse.getBoundingClientRect();
+  const noScroll = bar.scrollWidth <= bar.clientWidth + 1;
+  const sendInside = sendBox.right <= cardBox.right + 0.5;
+  const collapseInside = collapseBox.right <= cardBox.right + 0.5;
+  ok(`${label}：工具条不横向溢出`, noScroll,
+    `scroll=${bar.scrollWidth} client=${bar.clientWidth}`);
+  ok(`${label}：收起 / 发送按钮都在卡片内`, sendInside && collapseInside,
+    `卡片右缘=${Math.round(cardBox.right)} 收起右缘=${Math.round(collapseBox.right)} 发送右缘=${Math.round(sendBox.right)} 工具条宽=${Math.round(barBox.width)}`);
+};
+toolbarFits("默认宽度");
+
+/* 把代码面板拉宽 → 主栏变窄，模拟用户那种窄窗口场景 */
+document.documentElement.style.setProperty("--cx-panel-w", "760px");
+await sleep(150);
+toolbarFits("窄主栏");
+document.documentElement.style.removeProperty("--cx-panel-w");
+await sleep(120);
+
 /* ---------- 11. 三栏拖拽必须实时缩放 ----------
  *
  * 两个要点：
@@ -368,7 +450,7 @@ const goto = async (path) => {
   await sleep(1200);
 };
 
-/* a. 一次 5xx → 重试 */
+/* a. 一次 5xx → 重试；两次都失败 → 换路由仍会重试（与 CF 静默期区分开） */
 await fetch("/__ctl/failnext?n=1");
 const cBefore = await ctlStats();
 await goto("/new");
@@ -378,7 +460,19 @@ ok("5xx 会重试一次并成功",
   "行数=" + listTitles().length + " 请求=" + (countOf(cAfter.counts, "/new.json") - countOf(cBefore.counts, "/new.json")));
 ok("重试确实带了 _cx_retry", cAfter.retries - cBefore.retries === 1, "_cx_retry 次数=" + (cAfter.retries - cBefore.retries));
 
-/* b. CF 挑战 → 用 #data-preloaded 里的列表 */
+await fetch("/__ctl/failnext?n=2");
+await goto("/unseen");
+/* 5xx 两次都失败后同样先走兜底（页面内有预加载数据），不是直接甩错误行 */
+ok("5xx 全失败时也先走兜底，而不是直接报错",
+  listTitles().length > 0 && /HTTP 500/.test(statusLine()), statusLine().slice(0, 44));
+const cR0 = await ctlStats();
+await goto("/read");
+const cR1 = await ctlStats();
+ok("普通失败后换路由仍会重新尝试（失败冷却不卡导航）",
+  countOf(cR1.counts, "/read.json") - countOf(cR0.counts, "/read.json") === 1,
+  "请求=" + (countOf(cR1.counts, "/read.json") - countOf(cR0.counts, "/read.json")));
+
+/* b. CF 挑战 → 用 #data-preloaded 里的列表，并且接下来一段时间不再发请求 */
 await fetch("/__ctl/block?on=1");
 const cB0 = await ctlStats();
 await goto("/top");
@@ -391,7 +485,8 @@ ok("CF 拦截时改用页面内预加载数据", titlesTop.length > 0 && titlesT
   titlesTop.slice(0, 2).join(" / ") + (titlesTop.length > 2 ? " …" : ""));
 ok("状态行说明了兜底来源", /预加载/.test(statusLine()), statusLine().slice(0, 40));
 
-/* c. 预加载里也没有 → 用原生 DOM 里已渲染的列表 */
+/* c. 预加载里也没有 → 用原生 DOM 里已渲染的列表；
+      同时验证「见过挑战之后进入静默期」：这一步连请求都不该发（0 次） */
 const pre = JSON.parse(q("#data-preloaded").getAttribute("data-preloaded"));
 delete pre.topicList_latest;
 q("#data-preloaded").setAttribute("data-preloaded", JSON.stringify(pre));
@@ -406,22 +501,27 @@ q("#main-outlet-inner").innerHTML = `
       <td class="posts">23</td><td class="views">904</td>
       <td class="activity"><span class="relative-date" title="2026-10-14T08:30:00.000Z">2 小时前</span></td></tr>
   </tbody></table>`;
+const cC0 = await ctlStats();
 await goto("/hot");
+const cC1 = await ctlStats();
 const titlesHot = listTitles();
-ok("预加载也没有时改用原生列表 DOM",
+ok("见过挑战后进入静默期：换路由也不发请求",
+  countOf(cC1.counts, "/hot.json") - countOf(cC0.counts, "/hot.json") === 0 && cC1.retries === cC0.retries,
+  "请求=" + (countOf(cC1.counts, "/hot.json") - countOf(cC0.counts, "/hot.json")));
+ok("静默期里靠原生列表 DOM 兜底，内容照旧",
   titlesHot.length === 2 && titlesHot.every((t) => t.startsWith("原生列表·")), titlesHot.join(" / "));
 ok("原生列表解析出的回复数正确", /23 回复/.test(q(".cx-thread-rows").textContent || ""), "含 23 回复");
+ok("状态行写明了已暂停请求", /暂停接口请求/.test(statusLine()), statusLine().slice(0, 52));
 
-/* d. 两个兜底都没有 → 错误行 */
+/* d. 两个兜底都没有 → 错误行（静默期里同样一次请求都不发） */
 q("#main-outlet-inner").innerHTML = "";
 const cD0 = await ctlStats();
 await goto("/bookmarks");
 const cD1 = await ctlStats();
 ok("兜底数据也没有时给出错误行",
   /列表加载失败/.test(statusLine()) && !/预加载/.test(statusLine()), statusLine().slice(0, 46));
-ok("换路由会重新尝试（不被失败冷却卡住）",
-  countOf(cD1.counts, "/bookmarks.json") - countOf(cD0.counts, "/bookmarks.json") === 1,
-  "请求=" + (countOf(cD1.counts, "/bookmarks.json") - countOf(cD0.counts, "/bookmarks.json")));
+ok("静默期内不发请求", countOf(cD1.counts, "/bookmarks.json") === 0,
+  "请求=" + countOf(cD1.counts, "/bookmarks.json"));
 
 /* 这一节结束时故意让 CF 拦截保持打开：run.js 的第三阶段要在一个新页面里
    验证「刚打开就被拦」时列表与详情都走预加载兜底。 */

@@ -144,6 +144,12 @@
     /* —— 撰写 —— */
     /** 输入框「实时预览」默认开启（对应工具栏上那个按钮） */
     composePreview: false,
+    /**
+     * 底部输入框是否收起成一条细栏。
+     * 这是「当前状态」不是「一次性默认值」：面板里的开关和输入框上的收起按钮
+     * 改的是同一个值，刷新 / 换路由都保持。
+     */
+    composerCollapsed: false,
 
     /* —— 伪装（移植自 v2ex-codex 1.0.0）—— */
     /**
@@ -321,8 +327,13 @@
    *
    * 站点自己的 Ember 路由也会写 document.title，所以这个函数不只在启动时跑：
    * syncChrome() / syncRail() 里各调一次，后写的那个负责盖住站点的标题。
+   *
+   * 但**整页正在 CF 挑战时一律不动**：那时的标题是挑战页自己的
+   * （"Just a moment..."），改写成源码文件名既没意义，又让人误以为挑战已经过了；
+   * 挑战通过后（cfBlocked 变 false）下一拍自然会写上。
    */
   function syncTitle() {
+    if (cfBlocked()) return;
     const file = (CODE_LANGS[getCodeLang()] || {}).file || "lib.rs";
     if (cfg("stealth")) {
       const want = file + " \u2014 " + (cfg("projectName") || "platform");
@@ -407,6 +418,7 @@
     makeFavicon();                // favicon 底色跟着明暗走
     syncBrandName();              // 左栏品牌名（brandName / stealth）
     syncTitle();                  // 标签页标题（伪装模式下换成源码文件名）
+    syncComposerCollapsed();      // 底部输入框收起 / 展开
     // 伪装模式关掉后不能把伪装视图留在屏幕上：setBoss(true) 进不去，但已经进去的
     // 那一次得有人负责退出（此外还挡掉「关开关时正好在伪装视图里」的僵态）
     if (!cfg("stealth") && bossOn()) setBoss(false, true);
@@ -446,6 +458,7 @@
     chevronLeft: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="14 6 8 12 14 18"/></svg>`,
     chevronRight: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="10 6 16 12 10 18"/></svg>`,
     chevronDown: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="7 9 12 14 17 9"/></svg>`,
+    chevronUp: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="7 15 12 10 17 15"/></svg>`,
     chevronRightSm: `<svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 6 15 12 9 18"/></svg>`,
     search: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>`,
     bell: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 1 0-12 0c0 7-3 8-3 8h18s-3-1-3-8"/><path d="M13.7 20a2 2 0 0 1-3.4 0"/></svg>`,
@@ -589,14 +602,52 @@
     return err;
   }
 
+  /* ---- 出网闸门：挑战期间一个请求都不发 ------------------------------------
+   *
+   * 挑战页上每一次 XHR 都会被重新过一遍机器人判定，脚本自己那些后台请求
+   * （列表 / 分类 / 阅读进度上报 / 翻页预取…）等于自己给自己加码，
+   * 只会让挑战更容易升级。所以：
+   *   - 整页被判成挑战（cfBlocked，DOM/标题判定）→ 直接不发；
+   *   - 单次 XHR 被判成挑战（cf-mitigated / 403+HTML）→ 记一笔，静默 CF_HUSH_MS，
+   *     期间同样不发 —— 这一条尤其重要：整页看着正常、只有接口被拦时，
+   *     光靠 DOM 判定是拦不住的。
+   * 静默期结束后、或挑战通过后，cfBlocked 自然变 false，一切照旧。
+   * 拦下来时抛的错带 cfChallenge = true，调用方的兜底路径（页面内预加载数据 /
+   * 原生 DOM）本来就不发请求，所以用户依然能看到内容。
+   * ---------------------------------------------------------------------- */
+
+  const CF_HUSH_MS = 30000; // 见过一次接口挑战后静默多久
+  let cfHushUntil = 0;
+
+  function noteCfChallenge() {
+    cfHushUntil = Math.max(cfHushUntil, Date.now() + CF_HUSH_MS);
+  }
+  function cfHushed() {
+    return Date.now() < cfHushUntil;
+  }
+
+  /** 闸门：该不该出网。抛出的错和「真的被拦了」同形，调用方无需特判 */
+  function cfGate() {
+    if (!cfBlocked() && !cfHushed()) return;
+    const err = apiError(0, true);
+    err.message = cfBlocked() ? "CF 挑战中，已暂停请求" : "刚被 CF 拦过，暂停请求中";
+    err.paused = true;
+    throw err;
+  }
+
   async function api(path, extraHeaders) {
+    cfGate();
     const resp = await fetch(path, {
       // X-Requested-With 跟站点自己的 XHR 口径一致。Cloudflare 的机器人规则
       // 对「裸 fetch」和「XHR」的判定并不一样，加上这个头能明显减少 403。
       headers: { Accept: "application/json", "X-Requested-With": "XMLHttpRequest", ...extraHeaders },
       credentials: "same-origin"
     });
-    if (!resp.ok) throw apiError(resp.status, isCfChallenge(resp));
+    if (!resp.ok) {
+      const challenge = isCfChallenge(resp);
+      if (challenge) noteCfChallenge(); // 见过挑战 → 接下来一段时间不再发请求
+      throw apiError(resp.status, challenge);
+    }
     return resp.json();
   }
 
@@ -609,7 +660,7 @@
    */
   async function apiWithRetry(path, extraHeaders) {
     try {
-      return await api(path, extraHeaders);
+      return await api(path, extraHeaders); // 闸门在 api() 里；挑战错误不会走到重试
     } catch (err) {
       const retryable = !err.cfChallenge && (!err.status || err.status >= 500 ||
         err.status === 408 || err.status === 429);
@@ -746,6 +797,7 @@
 
   /** 写请求（PUT/POST/DELETE），带 CSRF；失败抛 HTTP 状态（移植自 im bridge/api.js） */
   async function apiSend(path, method, body) {
+    cfGate(); // 挑战期间连写请求也不发（这些请求此刻也不可能成功）
     const resp = await fetch(path, {
       method,
       credentials: "same-origin",
@@ -923,9 +975,23 @@
 
   function setComposerStatus(text, state) {
     const el = document.querySelector(".codex-composer .cx-composer-status");
-    if (!el) return;
-    el.textContent = text || "";
-    el.className = "cx-composer-status" + (state ? ` cx-${state}` : "");
+    if (el) {
+      el.textContent = text || "";
+      el.className = "cx-composer-status" + (state ? ` cx-${state}` : "");
+    }
+    // 收起时工具栏整条是隐藏的：把状态同时写到细栏上，
+    // 否则「正在发送…」「已发送 ✓」「发送失败」这些提示全都看不见
+    const hint = document.querySelector(".codex-composer [data-composer-hint]");
+    if (hint && composerCollapsed()) {
+      if (text) {
+        hint.textContent = text;
+        hint.className = "cx-composer-mini-hint" + (state ? ` cx-${state}` : "");
+        clearTimeout(hint._statusTimer);
+        hint._statusTimer = setTimeout(() => syncComposerCollapsed(), 2500);
+      } else {
+        syncComposerCollapsed();
+      }
+    }
   }
 
   /* ============================== 嵌入 im 式 markdown 输入框（移植自 im ui/composer.js + markdown-lite.js） ==============================
@@ -1111,7 +1177,56 @@
     return seq.map((k) =>
       `<button type="button" class="cx-tool-btn" data-tool="${k}" title="${CX_TOOL_TITLES[k]}"${k === "folder" ? ` data-upload="1"` : ""}>${CX_EDITOR_ICONS[k]}</button>`
     ).join("") + `<span class="cx-composer-status"></span>` +
+      `<button type="button" class="cx-tool-btn" data-composer-toggle="collapse" title="收起输入框（只留一条细栏）">${ICONS.chevronDown}</button>` +
       `<button type="button" class="codex-composer-send" title="发送（Enter）" disabled>${ICONS.send}</button>`;
+  }
+
+  /* ---- 底部输入框的收起 / 展开 -------------------------------------------
+   *
+   * 收起后只留一条细栏（草稿、目标楼、发送状态都还在），点细栏或箭头展开回来。
+   * 状态存在设置里（composerCollapsed），刷新和换路由都保持；用户点「回复」某个
+   * 楼层时必须自动展开，否则等于把回复入口藏了。
+   * ---------------------------------------------------------------------- */
+
+  function composerCollapsed() {
+    return !!cfg("composerCollapsed");
+  }
+
+  /** 把收起状态刷到 DOM 上（幂等；composer 还没建时直接跳过） */
+  function syncComposerCollapsed() {
+    const card = document.querySelector(".codex-composer");
+    if (!card) return;
+    const collapsed = composerCollapsed();
+    card.classList.toggle("cx-collapsed", collapsed);
+    const hint = card.querySelector("[data-composer-hint]");
+    if (hint) {
+      const input = card.querySelector(".cx-md-edit");
+      const draft = input && !cxMdIsEmpty(input);
+      const target = card.querySelector(".cx-compose-target.active span");
+      // 细栏上要能看出「这里现在是回复谁 / 有没有草稿」，不然收起来就瞎了
+      hint.textContent = draft
+        ? "草稿已收起（点这里继续写）"
+        : target && target.textContent
+          ? target.textContent
+          : (input && input.dataset.placeholder) || "写点什么…";
+    }
+  }
+
+  function setComposerCollapsed(on, persist) {
+    const next = !!on;
+    if (persist) {
+      setCfg("composerCollapsed", next, { visualOnly: true }); // 落盘 + 刷视觉，不重建 DOM
+    } else {
+      if (!SETTINGS) SETTINGS = loadSettings();
+      SETTINGS.composerCollapsed = next;
+      syncComposerCollapsed();
+      syncSettingControls();
+    }
+    if (!next) {
+      // 展开时把光标送进输入框：收起 → 展开 → 直接能打字
+      const input = document.querySelector(".codex-composer .cx-md-edit");
+      input?.focus?.();
+    }
   }
 
   /* ---- 块级编辑器核心（聚焦块显示原文，其余块实时渲染） ---- */
@@ -1494,6 +1609,8 @@
     const name = post?.name || post?.username;
     target.querySelector("span").textContent = name ? `回复 ${name} · #${cxComposerTargetPost}` : `回复 #${cxComposerTargetPost}`;
     target.classList.add("active");
+    // 收起状态下点「回复」必须先把输入框放出来，不然用户以为没反应
+    if (composerCollapsed()) setComposerCollapsed(false, true);
     input?.focus();
   }
   function cxHideComposerTarget() {
@@ -1712,6 +1829,8 @@
       }
     });
     input.addEventListener("focusin", () => {
+      // 收起状态下被聚焦（比如点了「回复」某楼）→ 自动展开，否则等于把输入框藏了
+      if (composerCollapsed()) setComposerCollapsed(false, true);
       const at = input._caretAt;
       input._caretAt = null;
       let hit = at && document.caretRangeFromPoint?.(at.x, at.y);
@@ -1772,6 +1891,12 @@
       cxSubmitComposer();
     });
 
+    // 点细栏本身（不只是箭头）也展开，并顺手把光标放进输入框
+    card.querySelector("[data-composer-hint]")?.addEventListener("click", () => {
+      if (composerCollapsed()) setComposerCollapsed(false, true);
+      else input.focus();
+    });
+
     // 工具栏：folder 走文件选择，其余按 data-tool 分发
     for (const btn of card.querySelectorAll(".cx-tool-btn")) {
       const kind = btn.dataset.tool;
@@ -1779,6 +1904,11 @@
       btn.addEventListener("click", (e) => {
         e.preventDefault();
         e.stopPropagation();
+        // 收起 / 展开按钮（工具栏上的箭头与细栏上的箭头共用这个属性）
+        if (btn.dataset.composerToggle) {
+          setComposerCollapsed(btn.dataset.composerToggle === "collapse", true);
+          return;
+        }
         if (kind === "folder") {
           fileInput?.click();
         } else if (kind === "emoji") {
@@ -3078,6 +3208,36 @@
       padding: 10px 12px 8px;
     }
 
+    /* 收起态：只留一条细栏（点它 / 点箭头展开回来）。
+       收起只影响外观，草稿、目标楼、发送按钮都还在 DOM 里，展开即恢复。 */
+    .cx-composer-mini {
+      display: none;
+      align-items: center;
+      gap: 6px;
+      min-width: 0;
+    }
+    .cx-composer-mini-hint {
+      flex: 1;
+      min-width: 0;
+      font-size: 12.5px;
+      line-height: 1.5;
+      color: var(--cx-text-faint);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      cursor: text;
+    }
+    .cx-composer-mini-hint.cx-busy { color: var(--cx-text-secondary); }
+    .cx-composer-mini-hint.cx-ok { color: var(--cx-blue); }
+    .cx-composer-mini-hint.cx-err { color: var(--cx-danger, #e0626a); }
+    .codex-composer.cx-collapsed { padding: 6px 10px; border-radius: 12px; }
+    .codex-composer.cx-collapsed .cx-compose-target,
+    .codex-composer.cx-collapsed .cx-compose-preview,
+    .codex-composer.cx-collapsed .cx-md-edit,
+    .codex-composer.cx-collapsed .cx-composer-toolbar { display: none !important; }
+    .codex-composer.cx-collapsed .cx-composer-mini { display: flex; }
+    .cx-composer-mini .cx-tool-btn { width: 26px; height: 26px; padding: 4px; }
+
     /* 输入区：contenteditable，Typora 式块级渐进渲染 */
     .cx-md-edit {
       color: var(--cx-text);
@@ -3179,17 +3339,27 @@
     }
     .cx-compose-target button:hover { color: var(--cx-text); }
 
-    /* 工具栏（输入框下方） */
+    /* 工具栏（输入框下方）
+     *
+     * 这条工具条一共 13 个工具键 + 收起键 + 发送键，固有宽度约 430px；而卡片宽度受
+     * 「主栏宽度」和 max-width 双重限制，窄窗口 + 代码面板开着时内容区可能只有 370px。
+     * flex 默认 nowrap，超出的部分会被外层 .codex-body{overflow:hidden} 直接裁掉
+     * —— 表现就是右端的收起 / 发送按钮「显示不全」。所以这里：
+     *   - flex-wrap: wrap 兜底：真装不下就换行，绝不裁；
+     *   - 工具键 28→26、发送键 30→28、状态左右 margin 8→6，把固有宽度压下来；
+     *   - 状态条 min-width: 0，让它先被压缩（它是弹性项，压缩它比裁按钮合理）。 */
     .cx-composer-toolbar {
       display: flex;
       align-items: center;
+      flex-wrap: wrap;
       gap: 2px;
+      row-gap: 4px;
       padding-top: 8px;
       margin-top: 6px;
       border-top: 1px solid var(--cx-border-soft);
     }
     .cx-composer-toolbar .cx-tool-btn {
-      width: 28px; height: 28px;
+      width: 26px; height: 26px;
       border-radius: 6px;
       display: grid; place-items: center;
       border: none; background: none;
@@ -3202,11 +3372,12 @@
     .cx-composer-toolbar .cx-tool-btn svg { width: 16px; height: 16px; }
     .cx-composer-toolbar .cx-tool-btn.active { color: var(--cx-blue); }
     .cx-composer-status {
-      flex: 1;
+      flex: 1 1 auto;
+      min-width: 0;
       min-height: 16px;
       font-size: 12px;
       color: var(--cx-text-faint);
-      margin: 0 8px;
+      margin: 0 6px;
       text-align: right;
       white-space: nowrap;
       overflow: hidden;
@@ -3217,7 +3388,7 @@
     .cx-composer-status.cx-err { color: #e0626a; }
     .codex-composer-send {
       flex: none;
-      width: 30px; height: 30px;
+      width: 28px; height: 28px;
       border-radius: 50%;
       background: var(--cx-send-bg);
       color: var(--cx-send-icon);
@@ -3272,7 +3443,7 @@
     .cx-plus-item:hover { background: var(--cx-btn-hover); color: var(--cx-text); }
 
     /* 代码面板展开时再收一档（原版输入框随分屏变窄） */
-    .${ROOT_CLASS}:not(.codex-hide-code-panel) .codex-composer { max-width: 500px; }
+    .${ROOT_CLASS}:not(.codex-hide-code-panel) .codex-composer { max-width: 560px; }
 
     /* ================= 分屏：右侧代码面板（纯氛围，列表/详情共享同一实例） ================= */
     /* 内容区横排：左 = 当前视图滚动容器，右 = 共享代码面板 */
@@ -4011,6 +4182,8 @@
   function makeFavicon() {
     const head = document.head;
     if (!head || faviconApplying) return;
+    // 挑战页上不换标：那是 CF 的页面，换成 Codex 图标只会让人以为站点正常
+    if (cfBlocked()) return;
     const href = makeCodexFaviconUri();
     if (!href) {
       // 「保留原图标」：不用覆盖，但得把之前覆盖过的还回去
@@ -5271,6 +5444,10 @@
           </div>
           <div class="codex-composer-wrap">
             <div class="codex-composer">
+              <div class="cx-composer-mini">
+                <span class="cx-composer-mini-hint" data-composer-hint title="点这里展开输入框">写点什么…</span>
+                <button type="button" class="cx-tool-btn" data-composer-toggle="expand" title="展开输入框">${ICONS.chevronUp}</button>
+              </div>
               <div class="cx-compose-target"><span></span><button type="button" title="取消回复">×</button></div>
               <div class="cx-compose-preview" aria-live="polite"></div>
               <div class="cx-md-edit" data-cx-compose="1" contenteditable="true" role="textbox" aria-multiline="true" data-placeholder="发送消息…"></div>
@@ -5629,6 +5806,8 @@
     // 每次渲染后盖一次最省事）
     syncBrandName();
     syncTitle();
+    // 细栏上的提示文案跟着路由走（回复谁 / 在哪个版块发帖）
+    syncComposerCollapsed();
     // 代码面板跟随路由换种子（列表 = 路由哈希，详情 = 话题 id；内部有签名去重）
     renderCodePanel();
   }
@@ -5756,15 +5935,17 @@
    */
   function recoverListData(err) {
     const why = err && err.cfChallenge ? "被 Cloudflare 拦截" : `HTTP ${(err && err.status) || "?"}`;
+    // 静默期里说实话：不是请求失败，是我们主动停发（避免自己给自己加码）
+    const paused = err && err.paused ? "（已暂停接口请求 30 秒）" : "";
     const preloaded = preloadedTopicList();
     if (preloaded) {
-      listState.notice = `列表接口${why}，已改用页面内预加载数据`;
+      listState.notice = `列表接口${why}${paused}，已改用页面内预加载数据`;
       applyListJson(preloaded, false);
       return true;
     }
     const scraped = scrapeNativeTopicList();
     if (scraped.length) {
-      listState.notice = `列表接口${why}，已改用原生列表里已渲染的数据`;
+      listState.notice = `列表接口${why}${paused}，已改用原生列表里已渲染的数据`;
       listState.moreUrl = null;
       listState.topics = scraped;
       renderListRows();
@@ -6418,6 +6599,9 @@
 
   async function flushReadTrack() {
     if (readFlushing || !readTimings.size || !readActiveTopic) return;
+    // 挑战期间连这一批也先攒着不发：它是最典型的「自己给自己加码」——
+    // 每隔几秒一次后台 POST。放行后下一拍会把攒下的（有上限的）时长一起结算。
+    if (cfBlocked() || cfHushed()) return;
     const id = readActiveTopic;
     const batch = [];
     for (const [n, ms] of readTimings) {
@@ -6454,6 +6638,7 @@
 
   function tickReadTrack() {
     if (otherThemeActive()) return;
+    if (cfBlocked() || cfHushed()) return; // 挑战期间不计时、不上报
     const now = Date.now();
     const diff = now - readLastTick;
     readLastTick = now;
@@ -7984,7 +8169,9 @@ const THINK_CLOSERS = [
     ] },
     { section: "撰写", items: [
       { key: "composePreview", type: "toggle", label: "输入框默认开启实时预览",
-        hint: "对应工具栏上的「实时预览」按钮；这里只决定新打开输入框时的默认状态" }
+        hint: "对应工具栏上的「实时预览」按钮；这里只决定新打开输入框时的默认状态" },
+      { key: "composerCollapsed", type: "toggle", label: "底部输入框收起",
+        hint: "收起后只留一条细栏（点细栏或箭头展开）；和输入框工具栏右端的收起箭头是同一个开关，点「回复」某楼时会自动展开" }
     ] },
     { section: "伪装", items: [
       { key: "stealth", type: "toggle", label: "伪装模式",
@@ -8405,13 +8592,19 @@ const THINK_CLOSERS = [
     startCfWatcher(); // 无论当前是否被 CF 拦截，都先挂上恢复/回退轮询
 
     /*
-     * 让位时（飞书 / IDEA / 旧的 linuxdo.user.js 在跑）**什么都不做**：
-     * 不注入样式、不加 ROOT_CLASS、不换 favicon、不改标题、不写 CSS 变量。
-     * 这些动作都是全局副作用，做了就会踩到对方那套 UI 的头上
-     * （比如把对方的标签页标题改成 "lib.rs — platform"、或用自己的 .cx-* 规则
-     * 盖掉对方的样式）。能接管时 applyTheme() 会把这些再补一遍。
+     * 两件事都要等 CF 判定之后再做：
+     *
+     *   1. **整页正在 CF 挑战时什么都不做** —— 不注入样式、不加 ROOT_CLASS、
+     *      不换 favicon、不写 CSS 变量、**不改伪装标题**（挑战页的 "Just a moment..."
+     *      是它自己的，改成源码文件名既没意义又误导）。挑战通过后 startCfWatcher
+     *      会调 applyTheme() 把一切补上。
+     *   2. 让位时（飞书 / IDEA / 旧的 linuxdo.user.js 在跑）同样不做：这些动作都是
+     *      全局副作用，做了就会踩到对方那套 UI 的头上（比如把对方的标签页标题
+     *      改成 "lib.rs — platform"、或用自己的 .cx-* 规则盖掉对方的样式）。
+     *
+     * 出网则统一由 cfGate()（见 api/apiSend）把关：挑战期间一个请求都不发。
      */
-    if (!otherThemeActive()) {
+    if (!otherThemeActive() && !cfBlocked()) {
       injectStyle();
       syncCxMode();
       document.documentElement.classList.add(ROOT_CLASS);
