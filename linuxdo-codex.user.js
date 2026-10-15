@@ -8,7 +8,7 @@
 // @icon         https://linux.do/favicon.ico
 // @grant        none
 // @run-at       document-start
-// @updateURL    https://github.com/George11811/linuxdo-codex/blob/master/linuxdo-codex.user.js
+// @updateURL    https://raw.githubusercontent.com/George11811/linuxdo-codex/main/linuxdo-codex.user.js
 // ==/UserScript==
 
 /*
