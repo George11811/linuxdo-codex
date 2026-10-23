@@ -6,7 +6,12 @@
  * 它做三件事：
  *   1. 起 tools/smoke/stub-server.js（假的 linux.do：外壳 HTML + Discourse JSON 端点）
  *   2. 用 --headless=new 打开 http://127.0.0.1:<port>/，页面里 <script src> 加载被测脚本
- *   3. 通过 CDP 在页面里跑 probe.js / probe-foreign.js 的断言，收集异常与 console.error
+ *   3. 通过 CDP 在页面里跑 probe*.js 的断言，收集异常与 console.error
+ *
+ * 六个阶段：正常接管 → 给别的主题让位 → 整站 JSON 被 CF 拦 → 整页是 CF 挑战页
+ *          → 页面不透明度（黑夜）→ 页面不透明度（浅色）
+ * 最后两个阶段的收官断言读**截图像素**（见 sampleRegion）：只有它能证明「合成之后
+ * 颜色是对的」，DOM 全绿但画面泛灰白正是这次要防的回归。
  *
  * 退出码 0 = 全部通过；1 = 有断言失败或页面异常。
  */
@@ -16,6 +21,7 @@ const { spawn, spawnSync } = require("child_process");
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
+const zlib = require("zlib");
 
 const PORT = Number(process.env.SMOKE_PORT || 8791);
 /*
@@ -124,6 +130,120 @@ async function evaluate(cdp, source) {
   }, 180000);
 }
 
+/*
+ * 极简 PNG 解码：只认 Chrome 截图会给出的 8bit / 非隔行格式（RGB / RGBA / 灰度）。
+ * 为什么要它：有些问题是**合成之后才存在**的 —— 比如「页面层半透明时透出了
+ * 底下的浅色原生页，整页泛灰白」。DOM 里每个元素的样式都正常，只有真正画出来的
+ * 像素错了。所以这一处必须读截图，而不是读 getComputedStyle。
+ * 只为一个取样点引依赖不值，索性自己解 ZLIB + PNG 那四行 filter。
+ */
+function decodePng(buf) {
+  if (buf.length < 8 || buf.readUInt32BE(0) !== 0x89504e47 || buf.readUInt32BE(4) !== 0x0d0a1a0a) {
+    throw new Error("不是 PNG");
+  }
+  let off = 8;
+  let ihdr = null;
+  const idat = [];
+  while (off + 8 <= buf.length) {
+    const len = buf.readUInt32BE(off);
+    const type = buf.toString("ascii", off + 4, off + 8);
+    const data = buf.subarray(off + 8, off + 8 + len);
+    if (type === "IHDR") {
+      ihdr = {
+        width: data.readUInt32BE(0),
+        height: data.readUInt32BE(4),
+        depth: data[8],
+        colorType: data[9],
+        interlace: data[12]
+      };
+    } else if (type === "IDAT") {
+      idat.push(data);
+    } else if (type === "IEND") {
+      break;
+    }
+    off += 12 + len;
+  }
+  if (!ihdr) throw new Error("PNG 缺 IHDR");
+  if (ihdr.depth !== 8 || ihdr.interlace !== 0) throw new Error("不支持的 PNG 编码：" + JSON.stringify(ihdr));
+  const channels = { 0: 1, 2: 3, 4: 2, 6: 4 }[ihdr.colorType];
+  if (!channels) throw new Error("不支持的 PNG 色彩类型：" + ihdr.colorType);
+
+  const raw = zlib.inflateSync(Buffer.concat(idat));
+  const stride = ihdr.width * channels;
+  const out = Buffer.alloc(stride * ihdr.height);
+  let prev = Buffer.alloc(stride);
+  for (let y = 0; y < ihdr.height; y++) {
+    const filter = raw[y * (stride + 1)];
+    const row = raw.subarray(y * (stride + 1) + 1, y * (stride + 1) + 1 + stride);
+    const cur = out.subarray(y * stride, (y + 1) * stride);
+    for (let i = 0; i < stride; i++) {
+      const a = i >= channels ? cur[i - channels] : 0;   // 左
+      const b = prev[i];                                 // 上
+      const c = i >= channels ? prev[i - channels] : 0;  // 左上
+      let v = row[i];
+      if (filter === 1) v += a;
+      else if (filter === 2) v += b;
+      else if (filter === 3) v += (a + b) >> 1;
+      else if (filter === 4) {
+        const p = a + b - c;
+        const pa = Math.abs(p - a), pb = Math.abs(p - b), pc = Math.abs(p - c);
+        v += pa <= pb && pa <= pc ? a : pb <= pc ? b : c;
+      }
+      cur[i] = v & 0xff;
+    }
+    prev = cur;
+  }
+  return { width: ihdr.width, height: ihdr.height, channels, data: out };
+}
+
+/** 对页面上某块区域截屏，返回平均 RGB —— 「实际画出来是什么颜色」的证据 */
+async function sampleRegion(cdp, clip) {
+  const shot = await cdp.send("Page.captureScreenshot", {
+    format: "png",
+    clip: { x: clip.x, y: clip.y, width: clip.size, height: clip.size, scale: 1 },
+    captureBeyondViewport: false
+  }, 20000);
+  const img = decodePng(Buffer.from(shot.data, "base64"));
+  let r = 0, g = 0, b = 0, n = 0;
+  for (let i = 0; i < img.data.length; i += img.channels) {
+    r += img.data[i]; g += img.data[i + 1]; b += img.data[i + 2]; n++;
+  }
+  return { r: Math.round(r / n), g: Math.round(g / n), b: Math.round(b / n), w: img.width, h: img.height };
+}
+
+/**
+ * 页面不透明度那一阶段的流程：把设置写进 localStorage → 整页重载 →
+ * 跑 probe-dim.js 量 DOM + 取一个取样点 → 截屏读像素，证明「调暗后还是主题底色」。
+ */
+async function runDimPhase(cdp, port, phase) {
+  await cdp.send("Runtime.evaluate", {
+    expression: `(() => {
+      const k = "linuxdo-codex:settings";
+      let v = {};
+      try { v = JSON.parse(localStorage.getItem(k) || "{}"); } catch (e) { v = {}; }
+      v.theme = ${JSON.stringify(phase)};
+      v.pageOpacity = 60;
+      localStorage.setItem(k, JSON.stringify(v));
+      return localStorage.getItem(k);
+    })()`,
+    returnByValue: true
+  }, 5000);
+  await cdp.send("Page.navigate", { url: `http://127.0.0.1:${port}/` }, 20000);
+  await sleep(2600);
+  const src = fs.readFileSync(path.join(__dirname, "probe-dim.js"), "utf8");
+  const res = await evaluate(cdp, `(async () => {\nconst DIM_PHASE = ${JSON.stringify(phase)};\n${src}\n})()`);
+  if (res.exceptionDetails) {
+    return { exception: "不透明度阶段（" + phase + "）probe 抛错：" + JSON.stringify(res.exceptionDetails).slice(0, 800) };
+  }
+  const value = (res.result && res.result.value) || {};
+  return {
+    results: value.results || [],
+    sample: value.sample,
+    expect: value.expect,
+    label: value.label || phase
+  };
+}
+
 async function main() {
   const browser = pickBrowser();
   log("browser:", browser);
@@ -227,14 +347,41 @@ async function main() {
     }
     const results4 = (res4.result && res4.result.value && res4.result.value.results) || [];
 
+    // 第五 / 第六阶段：页面不透明度（a. 黑夜、b. 浅色）。
+    // 这一阶段的最后一条断言必须读截图像素：DOM 里一切正常，只有合成后的颜色是错的
+    // （页面层半透明 → 透出底下浅色原生页 → 黑夜模式下整页泛灰白）。
+    const resultsDim = [];
+    for (const [phase, wantLight] of [["dark", false], ["light", true]]) {
+      const dim = await runDimPhase(cdp, PORT, phase);
+      if (dim.exception) { pageErrors.push(dim.exception); continue; }
+      let px = null;
+      try {
+        px = await sampleRegion(cdp, dim.sample);
+      } catch (err) {
+        pageErrors.push("取样像素失败：" + err.message);
+      }
+      const expect = dim.expect || { r: -1, g: -1, b: -1 };
+      const tol = 14; // 截图有过色彩管理，留一点余量
+      const near = !!px &&
+        Math.abs(px.r - expect.r) <= tol && Math.abs(px.g - expect.g) <= tol && Math.abs(px.b - expect.b) <= tol;
+      const tone = !!px && (wantLight ? Math.min(px.r, px.g, px.b) > 200 : Math.max(px.r, px.g, px.b) < 70);
+      resultsDim.push(...dim.results, {
+        pass: near && tone,
+        name: (dim.label || phase) + "：调暗后仍是主题底色（不是灰白）",
+        detail: px
+          ? `取样 ${px.w}×${px.h}px = rgb(${px.r}, ${px.g}, ${px.b})，期望 ≈ rgb(${expect.r}, ${expect.g}, ${expect.b})；旧实现会透出浅色原生页 ≈ rgb(116,116,116)`
+          : "没取到像素"
+      });
+    }
+
     const pad = (s, n) => String(s).padEnd(n);
     console.log("\n=== linuxdo-codex 冒烟测试 ===");
     let failed = 0;
-    for (const r of [...results, ...results2, ...results3, ...results4]) {
+    for (const r of [...results, ...results2, ...results3, ...results4, ...resultsDim]) {
       if (!r.pass) failed++;
       console.log(`${r.pass ? "PASS" : "FAIL"}  ${pad(r.name, 42)} ${r.detail}`);
     }
-    const total = results.length + results2.length + results3.length + results4.length;
+    const total = results.length + results2.length + results3.length + results4.length + resultsDim.length;
     console.log(`\n断言：${total - failed}/${total} 通过`);
     if (pageErrors.length) {
       console.log("\n--- 页面异常 ---");

@@ -14,7 +14,7 @@
 
 | 文件 | 说明 |
 | --- | --- |
-| `linuxdo-codex.user.js` | **本目录的交付物（v1.0.0）**。数据流沿用上游那条线，外观/玩法按 `reference/v2ex-codex.user.js` 1.0.0 补齐。 |
+| `linuxdo-codex.user.js` | **本目录的交付物（v1.0.1）**。数据流沿用上游那条线，外观/玩法按 `reference/v2ex-codex.user.js` 1.0.0 补齐。 |
 | `linuxdo.user.js` | v0.3.1 基线（移植时的参照）。⚠️ **当前不在工作区**，见文末「工作区状态」。要复现它可从脚本管理器导出，或装上游仓库的 v0.2.0。 |
 | `reference/v2ex-codex.user.js` | V2EX 版 Codex 外观（v1.0.0），本次玩法移植的来源。 |
 
@@ -53,6 +53,7 @@
 - **隐藏原生 Discourse 侧边栏**：`Topics / Upcoming events / All categories / Default` 那一列（`.sidebar-wrapper` / `#d-sidebar`）在 DOM 里和 `#main-outlet` 平级、自己没有背景色，原来会直接压在自绘 rail 上；现在整条 `display: none`。
 - **长标题悬停看全**：列表行的标题是 `ellipsis` 截断的，行和标题上都挂了 `title` 属性（原生列表就是这么做）；副行只显示 60 字摘要、悬停给出完整摘要；帖子页顶栏面包屑同理。
 - **三栏拖拽是真的实时**：按住不放宽度就跟着走；拖拽期间 Discourse 那边的 DOM 变动（→ `applyTheme`）不会再把还没落盘的宽度按旧设置顶回去。拖拽被 `pointercancel` / 窗口失焦打断时会正常收尾，不会把宽度锁死。
+- **「页面不透明度」在黑夜模式下不再泛灰白**：页面层（rail / 主区）调成半透明后，透出来的是它下面那一层——站点原生页面，而 Discourse 壳子默认是浅色的，等于把暗色 UI 半透明地压在白纸上。现在 dim 时先垫一层 `--cx-bg` 实心底（`html.codex-page-dim::before`，z-index 400，在主区 500 / rail 800 之下、浮层之下），页面层再对**它**半透明：效果变成「内容朝主题底色变淡」，明暗两种主题下都自然。`--cx-page-opacity` → 100 时这条规则根本不生效。
 
 **抗 Cloudflare 403（内容刷不出来）**
 
@@ -71,7 +72,7 @@ linux.do 挂在 Cloudflare 后面，`/latest.json`、`/t/<id>.json` 这些 JSON 
 
 | | 上游 `linuxdo-codex.user.js` | 移植基线（v0.3.1，已丢失） | 本交付物 `linuxdo-codex.user.js` |
 | --- | --- | --- | --- |
-| 版本 | v0.2.0 | v0.3.1 | v1.0.0 |
+| 版本 | v0.2.0 | v0.3.1 | v1.0.1 |
 | 列表 / 详情 / composer / 通知收养 | ✅ | ✅ | ✅（未改） |
 | agent 装饰（思考块 / 工具调用行） | — | ✅ | ✅ |
 | 设置面板 + 页面不透明度 | — | ✅ | ✅ |
@@ -89,12 +90,16 @@ linux.do 挂在 Cloudflare 后面，`/latest.json`、`/t/<id>.json` 这些 JSON 
 node tools/smoke/run.js
 ```
 
-覆盖 135 条断言，分四个阶段：
+覆盖 155 条断言，分六个阶段：
 
 1. **正常接管**（冒充 linux.do）：从 `/latest.json`、`/categories.json`、`/t/<id>.json` 渲染列表与详情；**原生侧边栏（`.sidebar-wrapper` / `#d-sidebar` / 底栏）被 `display:none`**；**列表行带完整标题的悬停提示、副行是「截断显示 + 完整摘要提示」**；伪装标题/品牌名/favicon；应急键三种配置（Esc² / F2 / Ctrl+Shift+H）；侧边栏模式三种子开关（含「手动退出后自动伪装仍生效」「鼠标回来不撤手动进的伪装」）；设置面板落盘与 Esc 状态机；缩略图与悬浮预览；切语言后的标题联动；composer 输入与实时预览；**底部输入框收起 / 展开（含「收起后确实变矮」「状态落盘」「收起时点回复自动展开」「换路由保持」）**；**工具条在默认与窄主栏两种宽度下都不横向溢出、收起 / 发送按钮都落在卡片内**；**左右两个把手拖拽期间就实时变宽（含「拖拽中外部重渲染不顶回宽度」「被打断后还能继续拖」）**；**接口 5xx 只重试一次、判成 Cloudflare 挑战就完全不重试**；**CF 拦截时列表改用 `#data-preloaded`、再退到原生列表 DOM 兜底，两者都没有才显示错误行**；**见过一次接口挑战后进入 30 秒静默期（换路由也不发请求）**。
 2. **互斥让位**（页面上已有别的 Codex 主题 UI）：不注入样式、不加标记、不画第二套 rail/主区、不改标题与 favicon，也不接管对方那份 `.cx-modal`。
 3. **整站 JSON 被拦的新开页面**（`/__ctl/block` 打开后重新加载帖子页）：列表与详情都靠页面内预加载数据顶住，且全程零重试请求。
 4. **整页是 CF 挑战中间页**（`/challenge`，标题 `Just a moment...`）：不注入样式/UI、**不改伪装标题、不换 favicon、零 API 请求**。
+5. **页面不透明度（黑夜）**：设置写成 `theme=dark` + `pageOpacity=60` 后整页重载 —— 量 dim 标记 / `--cx-page-opacity` / 主区 `opacity` / 垫底伪元素的颜色、`position`、`inset`、`z-index`、`pointer-events`，最后**截屏读像素**：取样点必须是 `rgb(24,24,24)`（主题底色），而不是「暗色 60% 叠白纸」的 `rgb(116,116,116)`。
+6. **页面不透明度（浅色）**：同一套断言在 `theme=light` 下再跑一遍，取样点必须是 `rgb(244,244,244)`。
+
+> 第 5/6 阶段的收官断言走 CDP `Page.captureScreenshot` + 自带极简 PNG 解码读真实像素：这一处「DOM 全绿但画面是错的」正是要防的回归——把垫底规则临时停掉，取样会精确回到 `rgb(116,116,116)`，断言随之变红（本目录 `run.js` 的 `sampleRegion` 就是为此写的）。
 
 > 注意：在有文件沙箱的环境里运行需要放开 `chrome.exe` 执行权限（脚本会启动 headless Chrome 并让它在系统临时目录建 profile）。
 > 断言若失败，退出码为 1，并打印页面异常与 `console.error`。
@@ -104,7 +109,7 @@ node tools/smoke/run.js
 ```
 linuxdo-codex.user.js        交付物：linux.do 版 Codex 外观（伪装版）
 reference/v2ex-codex.user.js V2EX 版，玩法移植来源
-tools/smoke/                 真实浏览器冒烟测试（stub 服务 + CDP runner + 断言）
+tools/smoke/                 真实浏览器冒烟测试（stub 服务 + CDP runner + 断言 + 截图像素比色）
 tools/recover/               从 DSH 会话记录（多 frame zstd）里捞回被删文件的脚本
 linuxdo.user.js              v0.3.1 基线 —— 当前不在工作区，见下方「工作区状态」
 ```

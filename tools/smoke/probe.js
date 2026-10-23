@@ -25,6 +25,11 @@ ok("rail 渲染且带归属标记", !!q('.codex-rail[data-cx-owner="linuxdo-code
 ok("主区渲染且带归属标记", !!q('.codex-main[data-cx-owner="linuxdo-codex-v1"]'));
 ok("html 上有激活标记", document.documentElement.classList.contains("codex-theme"));
 ok("接管路由隐藏原生主内容", document.documentElement.classList.contains("codex-locked"));
+/* 默认「页面不透明度」= 100%：不该加 dim 标记，也不该铺那层「主题底色垫底」。
+   垫底只在真的调暗时才铺（否则整页会被一块实心底盖住）。 */
+const beforePseudo = getComputedStyle(document.documentElement, "::before");
+ok("默认不透明度 100% 时不加 dim 标记", !document.documentElement.classList.contains("codex-page-dim"));
+ok("默认不透明度 100% 时不铺垫底", beforePseudo.content === "none", "::before content=" + beforePseudo.content);
 await sleep(500);
 ok("列表从 /latest.json 渲染出行", qa(".cx-trow").length >= 5, qa(".cx-trow").length + " 行");
 ok("列表标题正确", (q(".cx-proj-head h1") || {}).textContent === "最新", (q(".cx-proj-head h1") || {}).textContent);

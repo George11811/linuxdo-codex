@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Linux DO · Codex 外观（伪装版）
 // @namespace    https://linux.do/
-// @version      1.0.0
+// @version      1.0.1
 // @description  将 Linux DO 换成 Codex 桌面 app 风格：左 rail + 线程主区 + 右侧「代码面板」，明暗双模式；新增伪装模式（应急键 / 侧边栏模式）、缩略图与悬浮大图预览。仅改变外观，保留站点原有内容与交互。
 // @author       link
 // @match        https://linux.do/*
@@ -80,6 +80,10 @@
    *      （toast 更是拿 opacity 做显隐的），灯箱调暗则等于自废武功；
    *   3. 这里的字符串是**唯一来源**：RAW_CSS 里的规则由它拼出来（见 buildCss），
    *      所以 CSS 和 JS 不可能对不上（不用手抄两遍）。
+   *   4. 名单里每一层的**底色必须不透明**：半透明时透出来的是站点原生页面
+   *      （浅色壳子），黑夜模式下整页会泛灰白。dim 时 RAW_CSS 里那条
+   *      `html.codex-page-dim::before` 会垫一层 `--cx-bg` 实心底，页面层再对
+   *      它半透明；新加一层只要保证底色是实心 token，就自动跟着正确。
    */
   const PAGE_LAYER_SELECTOR = [
     ".codex-rail",  // 脚本自绘：左 rail
@@ -2308,6 +2312,29 @@
        不透明度 = 100 时 dim class 不会加上，这条规则根本不生效。 */
     PAGE_LAYER_LIST {
       opacity: var(--cx-page-opacity, 1);
+    }
+
+    /* ---------- 半透明页面层的「垫底」 ----------
+     *
+     * 页面层调成半透明后，透出来的是它下面那一层 —— 而下面正好是站点原生页面
+     * （Discourse 主题默认浅色壳子）。黑夜模式下把这层暗色 UI 半透明地压在浅色
+     * 原生页上，整页就泛成灰白（用户截图里的「黑夜模式透明度很怪」）。
+     *
+     * 所以 dim 时先铺一层实心「主题底色」，页面层再对**它**半透明：
+     * 结果等价于「内容朝主题底色变淡」，明暗两种主题下都自然，也不会透出原生页。
+     * 底色用 --cx-bg：和主区自己的 background 同一个值，叠上去才看不出接缝。
+     *
+     * 层级：垫底 400 < 主区 500 < rail 800 < 设置面板 / 灯箱 / toast（1300+）
+     *   —— 浮层永远在垫底之上，所以「调暗找不回滑杆」的老问题不会复发。
+     * pointer-events: none：它只是一块底色，不参与点击。
+     */
+    html.${ROOT_CLASS}.${DIMMED_CLASS}::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      z-index: 400;
+      background: var(--cx-bg);
+      pointer-events: none;
     }
 
     /* ---------- 顶栏视觉隐藏（保留 DOM，供 user-menu / composer 挂载点击） ---------- */
